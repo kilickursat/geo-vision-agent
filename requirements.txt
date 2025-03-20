@@ -1,12 +1,12 @@
-streamlit
-smolagents
-transformers
-huggingface-hub
-requests
-pandas
-numpy
-plotly
-python-dotenv
+streamlit==1.24.0
+smolagents==0.1.0
+transformers==4.30.2
+huggingface-hub==0.16.4
+requests==2.31.0
+pandas==1.5.3
+numpy==1.24.3
+plotly==5.15.0
+python-dotenv==1.0.0
 
 # Use alternative packages for PDF processing that have fewer dependencies
 PyPDF2==3.0.1
