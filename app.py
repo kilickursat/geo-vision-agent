@@ -25,10 +25,16 @@ st.set_page_config(
 
 # Function to get Hugging Face token
 def get_hf_token():
-    """Get Hugging Face token from environment variable or user input."""
+    """Get Hugging Face token from environment variable or Streamlit secrets."""
+    # First check environment variable
     token = os.getenv("HF_TOKEN")
+    
+    # Then check Streamlit secrets
+    if not token and 'huggingface' in st.secrets:
+        token = st.secrets["huggingface"]["hf_token"]
+    
+    # Finally, request from user if not found
     if not token:
-        # If not in environment, get from session state or user input
         if "hf_token" not in st.session_state:
             st.session_state.hf_token = st.text_input(
                 "Enter your Hugging Face API token:",
@@ -36,6 +42,7 @@ def get_hf_token():
                 help="Get your token from https://huggingface.co/settings/tokens"
             )
         token = st.session_state.hf_token
+        
     return token
 
 # Tool for extraction agent
