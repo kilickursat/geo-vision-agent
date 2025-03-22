@@ -161,7 +161,7 @@ def extract_from_file(file_content: bytes, file_type: str) -> Dict[str, float]:
         
         # Make API request to Hugging Face Inference API for the vision model
         try:
-            api_url = "https://api-inference.huggingface.co/models/Qwen/Qwen2.5-VL-72B-Instruct"
+            api_url = "https://api-inference.huggingface.co/models/Qwen/Qwen2-VL-72B-Instruct" 
             headers = {"Authorization": f"Bearer {token}"}
             payload = {
                 "inputs": {
