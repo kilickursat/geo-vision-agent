@@ -1,5 +1,5 @@
 streamlit
-smolagents
+smolagents[all]
 transformers
 huggingface-hub
 requests
