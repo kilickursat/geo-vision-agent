@@ -20,21 +20,6 @@ st.set_page_config(
     layout="wide"
 )
 
-# Install required packages if missing
-try:
-    import smolagents
-    SMOLAGENTS_AVAILABLE = True
-except ImportError:
-    st.error("smolagents package is not available. Installing it now...")
-    os.system("pip install smolagents -q")
-    try:
-        import smolagents
-        SMOLAGENTS_AVAILABLE = True
-        st.success("Successfully installed smolagents!")
-    except ImportError:
-        st.error("Failed to install smolagents. Some functionality will be limited.")
-        SMOLAGENTS_AVAILABLE = False
-
 # Try to import pdf2image, but have a fallback option
 try:
     from pdf2image import convert_from_bytes
@@ -64,10 +49,13 @@ except ImportError:
             # Return a blank image as last resort
             return [Image.new('RGB', (612, 792), 'white')]
 
-# Import smolagents components
-if SMOLAGENTS_AVAILABLE:
-    from smolagents import HfApiModel, CodeAgent, DuckDuckGoSearchTool, ToolMessage, AgentMessage, HumanMessage
-else:
+# Import smolagents components - IMPORTANT: Note the modified imports
+try:
+    from smolagents import HfApiModel, CodeAgent, DuckDuckGoSearchTool
+    SMOLAGENTS_AVAILABLE = True
+except ImportError:
+    st.error("smolagents package is not available. Some functionality will be limited.")
+    SMOLAGENTS_AVAILABLE = False
     # Create dummy classes/functions to prevent errors
     class HfApiModel:
         def __init__(self, *args, **kwargs):
@@ -83,64 +71,28 @@ else:
     class DuckDuckGoSearchTool:
         def __call__(self, *args, **kwargs):
             return [{"title": "Search unavailable", "snippet": "Search functionality not available", "link": "#"}]
-    
-    class ToolMessage:
-        def __init__(self, content):
-            self.content = content
-    
-    class AgentMessage:
-        def __init__(self, content):
-            self.content = content
-    
-    class HumanMessage:
-        def __init__(self, content):
-            self.content = content
 
-# Function to get Hugging Face token with comprehensive checking
+# Function to get Hugging Face token
 def get_hf_token():
-    """Get Hugging Face token from all possible sources."""
-    token = None
-    
+    """Get Hugging Face token from environment variable or Streamlit secrets."""
     # First check environment variable
-    if os.environ.get("HF_TOKEN"):
-        return os.environ.get("HF_TOKEN")
+    token = os.getenv("HF_TOKEN")
     
-    # Check in Streamlit secrets with various possible paths
-    if st.secrets:
-        if "huggingface_token" in st.secrets:
-            return st.secrets["huggingface_token"]
-        elif "huggingface" in st.secrets and "hf_token" in st.secrets["huggingface"]:
-            return st.secrets["huggingface"]["hf_token"]
-        elif "HF_TOKEN" in st.secrets:
-            return st.secrets["HF_TOKEN"]
+    # Then check Streamlit secrets
+    if not token and 'huggingface' in st.secrets:
+        token = st.secrets["huggingface"]["hf_token"]
     
-    # Request from user if not found
-    if "hf_token" not in st.session_state:
-        st.session_state.hf_token = st.text_input(
-            "Enter your Hugging Face API token:",
-            type="password",
-            help="Get your token from https://huggingface.co/settings/tokens"
-        )
-    return st.session_state.hf_token
-
-# Test token validity
-def test_token_validity(token):
-    """Test if the token has appropriate permissions."""
+    # Finally, request from user if not found
     if not token:
-        return False, "No token provided"
+        if "hf_token" not in st.session_state:
+            st.session_state.hf_token = st.text_input(
+                "Enter your Hugging Face API token:",
+                type="password",
+                help="Get your token from https://huggingface.co/settings/tokens"
+            )
+        token = st.session_state.hf_token
         
-    # Test with a simple API endpoint that should be accessible
-    test_url = "https://api-inference.huggingface.co/models/gpt2"
-    headers = {"Authorization": f"Bearer {token}"}
-    
-    try:
-        response = requests.get(test_url, headers=headers)
-        if response.status_code == 200:
-            return True, "Token is valid"
-        else:
-            return False, f"Token validation failed with status code: {response.status_code}"
-    except Exception as e:
-        return False, f"Error validating token: {str(e)}"
+    return token
 
 # Tool for extraction agent
 def extract_from_file(file_content: bytes, file_type: str) -> Dict[str, float]:
@@ -179,12 +131,6 @@ def extract_from_file(file_content: bytes, file_type: str) -> Dict[str, float]:
             st.error("Hugging Face token is required for parameter extraction.")
             return sample_geotechnical_data()
         
-        # Test token validity
-        token_valid, token_message = test_token_validity(token)
-        if not token_valid:
-            st.error(f"Token validation issue: {token_message}")
-            return sample_geotechnical_data()
-            
         # Prepare prompt for the VLM
         prompt = """
         Extract the following geotechnical parameters from this image if present:
@@ -440,23 +386,14 @@ def create_visualizations(data: Dict[str, float]) -> Dict[str, Any]:
             "error": f"Error in visualization: {str(e)}"
         }
 
-# Initialize models and agents with improved error handling
+# Initialize models and agents
 def initialize_model_and_agents(token):
     """Initialize the VLM model and all agents."""
     if not token or not SMOLAGENTS_AVAILABLE:
         return None, None, None, None, None
     
     try:
-        # First try to login with the token
-        if SMOLAGENTS_AVAILABLE:
-            try:
-                from huggingface_hub import login
-                login(token=token)
-                st.success("Successfully authenticated with Hugging Face")
-            except Exception as e:
-                st.warning(f"Hugging Face login warning: {str(e)}")
-        
-        # Initialize the model with the proper token
+        # Initialize the vision-language model
         extraction_model = HfApiModel(
             model_id="Qwen/Qwen2.5-7B-Instruct",  # Using smaller model to reduce chances of permission issues
             token=token,
@@ -496,7 +433,6 @@ def initialize_model_and_agents(token):
         )
         
         # Manager agent to orchestrate the other agents
-        # In a full implementation, the manager would delegate to other agents
         manager_agent = CodeAgent(
             name="Manager Agent",
             model=extraction_model,
@@ -519,7 +455,7 @@ def initialize_model_and_agents(token):
         st.error(f"Error initializing agents: {str(e)}\n{traceback.format_exc()}")
         return None, None, None, None, None
 
-# Streamlit sidebar with debug features
+# Streamlit sidebar
 def create_sidebar():
     """Create and configure the sidebar."""
     with st.sidebar:
@@ -532,14 +468,12 @@ def create_sidebar():
         if debug_mode:
             st.subheader("Debug Information")
             token = get_hf_token()
-            token_valid, token_message = test_token_validity(token)
             
             # Display token information securely
             st.write(f"Token available: {'Yes' if token else 'No'}")
             if token:
                 masked_token = f"{token[:4]}...{token[-4:]}" if len(token) > 8 else "****"
                 st.write(f"Token: {masked_token}")
-                st.write(f"Token validity: {token_message}")
             
             # Display system information
             st.write(f"smolagents available: {SMOLAGENTS_AVAILABLE}")
@@ -628,24 +562,16 @@ def main():
                     # Extract parameters using agent or direct tool execution
                     try:
                         if extraction_agent and SMOLAGENTS_AVAILABLE:
-                            # Call extraction agent with file content
-                            extract_message = HumanMessage(
-                                f"Extract geotechnical parameters from this {file_type} file."
-                            )
-                            
-                            # Use the extraction agent to process the file
+                            # Call extraction agent with file content and task as a string
+                            # IMPORTANT: Changed to use string task and additional_args
+                            task = f"Extract geotechnical parameters from this {file_type} file."
                             extraction_result = extraction_agent.run(
-                                messages=[extract_message],
-                                tool_args={"file_content": file_content, "file_type": file_type}
+                                task,
+                                additional_args={"file_content": file_content, "file_type": file_type}
                             )
                             
-                            # Parse the result from the agent
-                            if isinstance(extraction_result, AgentMessage):
-                                result = json.loads(extraction_result.content)
-                            elif isinstance(extraction_result, ToolMessage):
-                                result = extraction_result.content
-                            else:
-                                result = extraction_result
+                            # No need to check message types - result is already the dictionary
+                            result = extraction_result
                         else:
                             # Fallback to direct tool execution
                             result = execute_tool_directly(
@@ -697,7 +623,7 @@ def main():
         else:
             st.info("Please upload a file to begin extraction.")
     
-    # Tab 2: Analysis
+    # Tab 2: Analysis (similarly updated for other tabs...)
     with tab2:
         st.subheader("Data Analysis")
         
@@ -706,24 +632,15 @@ def main():
                 with st.spinner("Analyzing data..."):
                     try:
                         if analyzer_agent and SMOLAGENTS_AVAILABLE:
-                            # Create analysis message for the analyzer agent
-                            analysis_message = HumanMessage(
-                                "Create a correlation panel from the extracted data."
-                            )
-                            
-                            # Use the analyzer agent to process the data
+                            # IMPORTANT: Changed to use string task and additional_args
+                            task = "Create a correlation panel from the extracted data."
                             analysis_result = analyzer_agent.run(
-                                messages=[analysis_message],
-                                tool_args={"data": st.session_state.extracted_data}
+                                task,
+                                additional_args={"data": st.session_state.extracted_data}
                             )
                             
-                            # Parse the result from the agent
-                            if isinstance(analysis_result, AgentMessage):
-                                result = json.loads(analysis_result.content)
-                            elif isinstance(analysis_result, ToolMessage):
-                                result = analysis_result.content
-                            else:
-                                result = analysis_result
+                            # Result is already the dictionary
+                            result = analysis_result
                         else:
                             # Fallback to direct tool execution
                             result = execute_tool_directly(
@@ -755,8 +672,9 @@ def main():
                     """)
         else:
             st.info("Extract parameters first to enable analysis.")
-    
-    # Tab 3: Visualization
+
+    # Continue with the same pattern for the visualization and web search tabs...
+    # Tab 3: Visualization 
     with tab3:
         st.subheader("Data Visualization")
         
@@ -777,24 +695,15 @@ def main():
                         filtered_data = {k: v for k, v in st.session_state.extracted_data.items() if k in selected_params}
                         
                         if visualization_agent and SMOLAGENTS_AVAILABLE:
-                            # Create visualization message for the visualization agent
-                            viz_message = HumanMessage(
-                                f"Create visualizations for these parameters: {', '.join(selected_params)}"
-                            )
-                            
-                            # Use the visualization agent to process the data
+                            # IMPORTANT: Changed to use string task and additional_args
+                            task = f"Create visualizations for these parameters: {', '.join(selected_params)}"
                             viz_result = visualization_agent.run(
-                                messages=[viz_message],
-                                tool_args={"data": filtered_data}
+                                task,
+                                additional_args={"data": filtered_data}
                             )
                             
-                            # Parse the result from the agent
-                            if isinstance(viz_result, AgentMessage):
-                                result = json.loads(viz_result.content)
-                            elif isinstance(viz_result, ToolMessage):
-                                result = viz_result.content
-                            else:
-                                result = viz_result
+                            # Result is already the dictionary
+                            result = viz_result
                         else:
                             # Fallback to direct tool execution
                             result = execute_tool_directly(
@@ -841,27 +750,11 @@ def main():
             with st.spinner("Searching for information..."):
                 try:
                     if search_agent and SMOLAGENTS_AVAILABLE:
-                        # Create search message for the search agent
-                        search_message = HumanMessage(search_query)
+                        # IMPORTANT: Changed to use string task directly
+                        search_result = search_agent.run(search_query)
                         
-                        # Use the search agent to perform the search
-                        search_result = search_agent.run(
-                            messages=[search_message],
-                            tool_args={"query": search_query, "max_results": 5}
-                        )
-                        
-                        # Parse the result from the agent
-                        if isinstance(search_result, AgentMessage):
-                            # The agent might return a message summarizing the search
-                            st.write("Agent summary:", search_result.content)
-                            # Extract the actual search results from the agent's content
-                            result = json.loads(search_result.content) if isinstance(search_result.content, str) else search_result.content
-                        elif isinstance(search_result, ToolMessage):
-                            # The tool returned the search results directly
-                            result = search_result.content
-                        else:
-                            # Direct result
-                            result = search_result
+                        # Result is already properly formatted
+                        result = search_result
                     else:
                         # Fallback when search functionality is unavailable
                         result = [
