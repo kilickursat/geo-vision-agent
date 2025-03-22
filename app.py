@@ -12,12 +12,19 @@ import json
 import requests
 from typing import List, Dict, Any, Union
 
+# Set page configuration - THIS MUST BE THE FIRST STREAMLIT COMMAND
+st.set_page_config(
+    page_title="Geotechnical Engineering Multi-Agent System",
+    page_icon="🧠",
+    layout="wide"
+)
+
 # Try to import pdf2image, but have a fallback option
 try:
     from pdf2image import convert_from_bytes
     PDF_TO_IMAGE_AVAILABLE = True
 except ImportError:
-    # Define a fallback using PyPDF2 and PIL
+    # Define a fallback using PyPDF2
     import PyPDF2
     
     PDF_TO_IMAGE_AVAILABLE = False
@@ -75,13 +82,6 @@ except ImportError:
     class HumanMessage:
         def __init__(self, content):
             self.content = content
-
-# Set page configuration
-st.set_page_config(
-    page_title="Geotechnical Engineering Multi-Agent System",
-    page_icon="🧠",
-    layout="wide"
-)
 
 # Function to get Hugging Face token
 def get_hf_token():
