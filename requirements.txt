@@ -3,14 +3,17 @@ smolagents==0.1.0
 transformers==4.30.2
 huggingface-hub==0.16.4
 requests==2.31.0
-pandas==1.5.3
-numpy==1.24.3
+pandas>=1.5.3
+numpy>=1.24.3
 plotly==5.15.0
 python-dotenv==1.0.0
 
 # Use alternative packages for PDF processing that have fewer dependencies
 PyPDF2==3.0.1
 Pillow==9.5.0
+
+# Add setuptools explicitly to handle distutils dependency
+setuptools>=60.0.0
 
 # Optional: Only include if absolutely needed
 # pdf2image==1.16.3
