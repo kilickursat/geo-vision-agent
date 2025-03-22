@@ -20,6 +20,21 @@ st.set_page_config(
     layout="wide"
 )
 
+# Install required packages if missing
+try:
+    import smolagents
+    SMOLAGENTS_AVAILABLE = True
+except ImportError:
+    st.error("smolagents package is not available. Installing it now...")
+    os.system("pip install smolagents -q")
+    try:
+        import smolagents
+        SMOLAGENTS_AVAILABLE = True
+        st.success("Successfully installed smolagents!")
+    except ImportError:
+        st.error("Failed to install smolagents. Some functionality will be limited.")
+        SMOLAGENTS_AVAILABLE = False
+
 # Try to import pdf2image, but have a fallback option
 try:
     from pdf2image import convert_from_bytes
@@ -49,14 +64,10 @@ except ImportError:
             # Return a blank image as last resort
             return [Image.new('RGB', (612, 792), 'white')]
 
-# Import smolagents components with proper error handling
-try:
-    from huggingface_hub import login
+# Import smolagents components
+if SMOLAGENTS_AVAILABLE:
     from smolagents import HfApiModel, CodeAgent, DuckDuckGoSearchTool, ToolMessage, AgentMessage, HumanMessage
-    SMOLAGENTS_AVAILABLE = True
-except ImportError:
-    st.warning("smolagents package is not available. Some functionality will be limited.")
-    SMOLAGENTS_AVAILABLE = False
+else:
     # Create dummy classes/functions to prevent errors
     class HfApiModel:
         def __init__(self, *args, **kwargs):
@@ -88,18 +99,20 @@ except ImportError:
 # Function to get Hugging Face token with comprehensive checking
 def get_hf_token():
     """Get Hugging Face token from all possible sources."""
-    # Check in Streamlit secrets with various possible paths
-    if 'huggingface_token' in st.secrets:
-        return st.secrets["huggingface_token"]
-    elif 'huggingface' in st.secrets and 'hf_token' in st.secrets["huggingface"]:
-        return st.secrets["huggingface"]["hf_token"]
-    elif 'HF_TOKEN' in st.secrets:
-        return st.secrets["HF_TOKEN"]
+    token = None
     
-    # Check environment variable
-    token = os.getenv("HF_TOKEN")
-    if token:
-        return token
+    # First check environment variable
+    if os.environ.get("HF_TOKEN"):
+        return os.environ.get("HF_TOKEN")
+    
+    # Check in Streamlit secrets with various possible paths
+    if st.secrets:
+        if "huggingface_token" in st.secrets:
+            return st.secrets["huggingface_token"]
+        elif "huggingface" in st.secrets and "hf_token" in st.secrets["huggingface"]:
+            return st.secrets["huggingface"]["hf_token"]
+        elif "HF_TOKEN" in st.secrets:
+            return st.secrets["HF_TOKEN"]
     
     # Request from user if not found
     if "hf_token" not in st.session_state:
@@ -191,8 +204,9 @@ def extract_from_file(file_content: bytes, file_type: str) -> Dict[str, float]:
         # Make API request to Hugging Face Inference API
         # Try with multiple model options in case of permission issues
         model_options = [
+            "Qwen/Qwen2.5-VL-7B-Instruct",  # Try smaller model first
             "Qwen/Qwen2.5-VL-72B-Instruct",
-            "Qwen/Qwen2.5-VL-7B-Instruct",  # Fallback to smaller model
+            "llava-hf/llava-1.5-7b-hf",
             "openai/clip-vit-base-patch32"  # Simple fallback model
         ]
         
@@ -436,6 +450,7 @@ def initialize_model_and_agents(token):
         # First try to login with the token
         if SMOLAGENTS_AVAILABLE:
             try:
+                from huggingface_hub import login
                 login(token=token)
                 st.success("Successfully authenticated with Hugging Face")
             except Exception as e:
@@ -443,7 +458,7 @@ def initialize_model_and_agents(token):
         
         # Initialize the model with the proper token
         extraction_model = HfApiModel(
-            model_id="Qwen/Qwen2.5-VL-7B-Instruct",  # Using smaller model to reduce chances of permission issues
+            model_id="Qwen/Qwen2.5-7B-Instruct",  # Using smaller model to reduce chances of permission issues
             token=token,
             max_tokens=5000
         )
