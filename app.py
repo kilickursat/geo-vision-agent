@@ -10,7 +10,7 @@ import plotly.graph_objects as go
 from PIL import Image
 import json
 import requests
-from typing import List, Dict, Any, Union
+from typing import List, Dict, Any, Union, Optional
 import traceback
 import logging
 
@@ -231,9 +231,9 @@ def extract_parameters_from_response(response):
         logging.error(f"Error extracting parameters: {str(e)}")
         return None
 
-# Tool for extraction
+# Tool for extraction - Fixed with proper type hint for qwen_model
 @tool
-def extract_from_file(file_content: bytes, file_type: str, qwen_model=None) -> Dict[str, float]:
+def extract_from_file(file_content: bytes, file_type: str, qwen_model: Optional[Any] = None) -> Dict[str, float]:
     """
     Extract geotechnical parameters from PDF or image files.
     
