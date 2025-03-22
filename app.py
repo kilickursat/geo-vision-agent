@@ -11,6 +11,7 @@ from PIL import Image
 import json
 import requests
 from typing import List, Dict, Any, Union
+import smolagents
 
 # Set page configuration - THIS MUST BE THE FIRST STREAMLIT COMMAND
 st.set_page_config(
