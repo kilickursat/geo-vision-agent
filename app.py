@@ -19,7 +19,7 @@ logging.basicConfig(level=logging.INFO)
 
 # Set page configuration - THIS MUST BE THE FIRST STREAMLIT COMMAND
 st.set_page_config(
-    page_title="Geotechnical Engineering Multi-Agent System",
+    page_title="Geotechnical Engineering Analysis System",
     page_icon="🧠",
     layout="wide"
 )
@@ -53,14 +53,28 @@ except ImportError:
             # Return a blank image as last resort
             return [Image.new('RGB', (612, 792), 'white')]
 
-# Import smolagents components
+# Import smolagents components with careful fallbacks
+SMOLAGENTS_AVAILABLE = False
 try:
-    from smolagents import tool, CodeAgent, HfApiModel, ToolCallingAgent, DuckDuckGoSearchTool, ManagedAgent
-    from huggingface_hub import login
+    # First try importing the minimal set of components we need
+    from smolagents import tool, CodeAgent, HfApiModel, DuckDuckGoSearchTool
+    
+    # Try importing huggingface_hub for login
+    try:
+        from huggingface_hub import login
+        HF_LOGIN_AVAILABLE = True
+    except ImportError:
+        HF_LOGIN_AVAILABLE = False
+        
+    # Mark smolagents as available if basic imports succeed
     SMOLAGENTS_AVAILABLE = True
+    
+    # Log successful import
+    logging.info("Successfully imported core SmolaAgent components")
+    
 except ImportError as e:
-    st.error(f"smolagents package is not available: {str(e)}. Some functionality will be limited.")
-    SMOLAGENTS_AVAILABLE = False
+    logging.error(f"Error importing smolagents: {str(e)}")
+    st.error(f"smolagents package is not available: {str(e)}. Using fallback methods.")
     
     # Create dummy classes/functions to prevent errors
     def tool(func):
@@ -77,17 +91,11 @@ except ImportError as e:
         def run(self, *args, **kwargs):
             return {"error": "Agent functionality not available"}
     
-    class ToolCallingAgent:
-        def __init__(self, *args, **kwargs):
-            pass
-            
-    class ManagedAgent:
-        def __init__(self, *args, **kwargs):
-            pass
-        
     class DuckDuckGoSearchTool:
         def __call__(self, *args, **kwargs):
             return [{"title": "Search unavailable", "snippet": "Search functionality not available", "link": "#"}]
+    
+    HF_LOGIN_AVAILABLE = False
 
 # Function to get Hugging Face token
 def get_hf_token():
@@ -111,7 +119,7 @@ def get_hf_token():
         
     return token
 
-# Tool for extraction agent
+# Tool for extraction
 @tool
 def extract_from_file(file_content: bytes, file_type: str) -> Dict[str, float]:
     """
@@ -283,7 +291,7 @@ def sample_geotechnical_data():
         "φ": 30
     }
 
-# Tool for analyzer agent
+# Tool for analyzer
 @tool
 def create_correlation_panel(data: Dict[str, float]) -> Dict[str, Any]:
     """
@@ -334,7 +342,7 @@ def create_correlation_panel(data: Dict[str, float]) -> Dict[str, Any]:
             "error": f"Error in correlation analysis: {str(e)}"
         }
 
-# Tool for visualization agent
+# Tool for visualization
 @tool
 def create_visualizations(data: Dict[str, float]) -> Dict[str, Any]:
     """
@@ -417,95 +425,62 @@ def search_geotechnical_data(query: str) -> List[Dict[str, str]]:
         List of search results as dictionaries.
     """
     try:
+        if not SMOLAGENTS_AVAILABLE:
+            return [
+                {"title": "Search unavailable", "snippet": "Search functionality is not available.", "link": "#"},
+                {"title": "Missing components", "snippet": "The required SmolaAgent components are not installed.", "link": "#"}
+            ]
+            
         search_tool = DuckDuckGoSearchTool()
         results = search_tool(query)
         return results
     except Exception as e:
         return [{"title": "Search error", "snippet": f"Error: {str(e)}", "link": "#"}]
 
-# Initialize models and agents
-def initialize_model_and_agents(token):
-    """Initialize the VLM model and all agents."""
-    if not token or not SMOLAGENTS_AVAILABLE:
-        return None, None, None, None, None
-    
-    try:
-        # Login to Hugging Face
-        login(token)
+# Direct function execution
+def execute_extraction(file_content, file_type):
+    """Execute extraction directly without using agents."""
+    return extract_from_file(file_content, file_type)
+
+def execute_correlation(data):
+    """Execute correlation analysis directly without using agents."""
+    return create_correlation_panel(data)
+
+def execute_visualization(data):
+    """Execute visualization directly without using agents."""
+    return create_visualizations(data)
+
+def execute_search(query):
+    """Execute search directly without using agents."""
+    return search_geotechnical_data(query)
+
+# Initialize basic agent using CodeAgent if available
+def initialize_basic_agent(token):
+    """Initialize a basic agent that can handle text instructions only."""
+    if not SMOLAGENTS_AVAILABLE or not token:
+        return None
         
-        # Initialize the model
+    try:
+        # If HF login is available, use it
+        if HF_LOGIN_AVAILABLE:
+            login(token)
+            
+        # Initialize a CodeAgent with available tools
         model = HfApiModel(
             model_id="Qwen/Qwen2.5-7B-Instruct",
-            token=token,
-            max_tokens=5000
+            token=token
         )
         
-        # Initialize specialized agents
-        # Web search agent
-        web_agent = ToolCallingAgent(
-            tools=[search_geotechnical_data],
-            model=model,
-            max_steps=5
+        # Initialize a basic agent
+        agent = CodeAgent(
+            tools=[extract_from_file, create_correlation_panel, create_visualizations, search_geotechnical_data],
+            model=model
         )
         
-        # Wrap as managed agent
-        search_agent = ManagedAgent(
-            agent=web_agent,
-            name="geotech_web_search",
-            description="Performs web searches for geotechnical data."
-        )
-        
-        # Extraction agent
-        extraction_agent_raw = ToolCallingAgent(
-            tools=[extract_from_file],
-            model=model,
-            max_steps=5
-        )
-        
-        extraction_agent = ManagedAgent(
-            agent=extraction_agent_raw,
-            name="extraction_agent",
-            description="Extracts geotechnical parameters from PDFs or images."
-        )
-        
-        # Analysis agent
-        analyzer_agent_raw = ToolCallingAgent(
-            tools=[create_correlation_panel],
-            model=model,
-            max_steps=5
-        )
-        
-        analyzer_agent = ManagedAgent(
-            agent=analyzer_agent_raw,
-            name="analyzer_agent",
-            description="Analyzes extracted data and generates correlation panels."
-        )
-        
-        # Visualization agent
-        visualization_agent_raw = ToolCallingAgent(
-            tools=[create_visualizations],
-            model=model,
-            max_steps=5
-        )
-        
-        visualization_agent = ManagedAgent(
-            agent=visualization_agent_raw,
-            name="visualization_agent",
-            description="Creates interactive visualizations of extracted data."
-        )
-        
-        # Manager agent
-        manager_agent = CodeAgent(
-            tools=[search_geotechnical_data],
-            model=model,
-            managed_agents=[search_agent, extraction_agent, analyzer_agent, visualization_agent],
-            additional_authorized_imports=["time", "numpy", "pandas"]
-        )
-        
-        return extraction_agent, analyzer_agent, visualization_agent, search_agent, manager_agent
+        return agent
     except Exception as e:
-        st.error(f"Error initializing agents: {str(e)}\n{traceback.format_exc()}")
-        return None, None, None, None, None
+        st.error(f"Error initializing basic agent: {str(e)}\n{traceback.format_exc()}")
+        return None
 
 # Streamlit sidebar
 def create_sidebar():
@@ -530,36 +505,28 @@ def create_sidebar():
             # Display system information
             st.write(f"smolagents available: {SMOLAGENTS_AVAILABLE}")
             st.write(f"PDF to Image available: {PDF_TO_IMAGE_AVAILABLE}")
+            st.write(f"HF Login available: {HF_LOGIN_AVAILABLE}")
         
-        # Agent status
-        st.subheader("Agent Status")
-        
-        if SMOLAGENTS_AVAILABLE:
-            agents = ["Extraction Agent", "Analyzer Agent", "Visualization Agent", "Web Search Agent"]
-            for agent in agents:
-                st.success(f"✅ {agent} Ready")
-        else:
-            st.warning("⚠️ Agent system unavailable. Using fallback methods.")
-            
         # Information
         st.subheader("Information")
         st.info("""
-        This application uses a multi-agent system with a vision-language model
-        to extract and analyze geotechnical parameters from unstructured data.
+        This application extracts and analyzes geotechnical parameters from unstructured data.
         
         Upload a PDF or image to begin analysis.
         """)
-
-# Direct tool execution as fallback when agents are not available
-def execute_tool_directly(tool_function, **kwargs):
-    """Execute a tool function directly, bypassing the agent system."""
-    return tool_function(**kwargs)
+        
+        # Show mode
+        st.subheader("Mode")
+        if SMOLAGENTS_AVAILABLE:
+            st.success("✅ SmolaAgent integration available")
+        else:
+            st.warning("⚠️ Using direct function mode (SmolaAgent not available)")
 
 # Main function
 def main():
     """Main application function."""
     # Set up the title and header
-    st.title("🧠 Geotechnical Engineering Multi-Agent System")
+    st.title("🧠 Geotechnical Engineering Analysis System")
     st.write("Extract, analyze, and visualize geotechnical parameters from unstructured data")
     
     # Create sidebar
@@ -568,15 +535,10 @@ def main():
     # Get Hugging Face token
     token = get_hf_token()
     
-    # Initialize models and agents if token is available
+    # Initialize basic agent if possible
+    basic_agent = None
     if token and SMOLAGENTS_AVAILABLE:
-        extraction_agent, analyzer_agent, visualization_agent, search_agent, manager_agent = initialize_model_and_agents(token)
-    else:
-        extraction_agent, analyzer_agent, visualization_agent, search_agent, manager_agent = None, None, None, None, None
-        if not token:
-            st.warning("Please enter your Hugging Face API token to enable parameter extraction.")
-        if not SMOLAGENTS_AVAILABLE:
-            st.warning("smolagents package is not available. Using fallback methods.")
+        basic_agent = initialize_basic_agent(token)
     
     # Initialize session state for storing data between runs
     if "extracted_data" not in st.session_state:
@@ -611,34 +573,43 @@ def main():
                     # Read file content
                     file_content = uploaded_file.getvalue()
                     
-                    # Extract parameters using agent or direct tool execution
+                    # Extract parameters
                     try:
-                        if extraction_agent and SMOLAGENTS_AVAILABLE:
-                            # Use the agent to extract parameters
-                            extraction_result = list(extraction_agent.agent.run(
-                                f"Extract geotechnical parameters from this {file_type} file",
-                                initial_args={"file_content": file_content, "file_type": file_type}
-                            ))
-                            
-                            # Get the last message from the agent
-                            if extraction_result:
-                                result = extraction_result[-1]
-                                if hasattr(result, 'content'):
-                                    result = result.content
-                                    # Try to parse as JSON if it's a string
-                                    if isinstance(result, str):
-                                        try:
-                                            result = json.loads(result)
-                                        except:
-                                            pass
-                            else:
-                                # Fallback to direct function call
-                                result = extract_from_file(file_content, file_type)
+                        if basic_agent:
+                            # Try to use the agent
+                            try:
+                                prompt = f"Extract geotechnical parameters from this {file_type}."
+                                result = basic_agent.run(
+                                    prompt,
+                                    extract_from_file={"file_content": file_content, "file_type": file_type}
+                                )
+                                
+                                # Process result
+                                if isinstance(result, list) and len(result) > 0:
+                                    # Get the last message from the agent
+                                    last_result = result[-1]
+                                    if hasattr(last_result, 'content'):
+                                        extracted_data = last_result.content
+                                    else:
+                                        extracted_data = last_result
+                                else:
+                                    extracted_data = result
+                                
+                                # Convert to dict if it's a string
+                                if isinstance(extracted_data, str):
+                                    try:
+                                        extracted_data = json.loads(extracted_data)
+                                    except:
+                                        # Fallback to direct execution
+                                        extracted_data = execute_extraction(file_content, file_type)
+                            except Exception as e:
+                                st.warning(f"Error using agent: {str(e)}. Falling back to direct execution.")
+                                extracted_data = execute_extraction(file_content, file_type)
                         else:
-                            # Fallback to direct tool execution
-                            result = extract_from_file(file_content, file_type)
-                            
-                        st.session_state.extracted_data = result
+                            # Direct execution
+                            extracted_data = execute_extraction(file_content, file_type)
+                        
+                        st.session_state.extracted_data = extracted_data
                     except Exception as e:
                         st.error(f"Error during extraction: {str(e)}\n{traceback.format_exc()}")
                         # Fallback to sample data
@@ -689,32 +660,41 @@ def main():
             if st.button("Generate Correlation Panel"):
                 with st.spinner("Analyzing data..."):
                     try:
-                        if analyzer_agent and SMOLAGENTS_AVAILABLE:
-                            # Use the agent to analyze data
-                            analysis_result = list(analyzer_agent.agent.run(
-                                "Create a correlation panel from the extracted data",
-                                initial_args={"data": st.session_state.extracted_data}
-                            ))
-                            
-                            # Get the last message from the agent
-                            if analysis_result:
-                                result = analysis_result[-1]
-                                if hasattr(result, 'content'):
-                                    result = result.content
-                                    # Try to parse as JSON if it's a string
-                                    if isinstance(result, str):
-                                        try:
-                                            result = json.loads(result)
-                                        except:
-                                            pass
-                            else:
-                                # Fallback to direct function call
-                                result = create_correlation_panel(st.session_state.extracted_data)
+                        if basic_agent:
+                            # Try to use the agent
+                            try:
+                                prompt = "Create a correlation panel from the extracted data."
+                                result = basic_agent.run(
+                                    prompt,
+                                    create_correlation_panel={"data": st.session_state.extracted_data}
+                                )
+                                
+                                # Process result
+                                if isinstance(result, list) and len(result) > 0:
+                                    # Get the last message from the agent
+                                    last_result = result[-1]
+                                    if hasattr(last_result, 'content'):
+                                        correlation_data = last_result.content
+                                    else:
+                                        correlation_data = last_result
+                                else:
+                                    correlation_data = result
+                                
+                                # Convert to dict if it's a string
+                                if isinstance(correlation_data, str):
+                                    try:
+                                        correlation_data = json.loads(correlation_data)
+                                    except:
+                                        # Fallback to direct execution
+                                        correlation_data = execute_correlation(st.session_state.extracted_data)
+                            except Exception as e:
+                                st.warning(f"Error using agent: {str(e)}. Falling back to direct execution.")
+                                correlation_data = execute_correlation(st.session_state.extracted_data)
                         else:
-                            # Fallback to direct tool execution
-                            result = create_correlation_panel(st.session_state.extracted_data)
+                            # Direct execution
+                            correlation_data = execute_correlation(st.session_state.extracted_data)
                             
-                        st.session_state.correlation_data = result
+                        st.session_state.correlation_data = correlation_data
                     except Exception as e:
                         st.error(f"Error during analysis: {str(e)}\n{traceback.format_exc()}")
             
@@ -759,32 +739,41 @@ def main():
                         # Filter data to include only selected parameters
                         filtered_data = {k: v for k, v in st.session_state.extracted_data.items() if k in selected_params}
                         
-                        if visualization_agent and SMOLAGENTS_AVAILABLE:
-                            # Use the agent to create visualizations
-                            viz_result = list(visualization_agent.agent.run(
-                                f"Create visualizations for these parameters: {', '.join(selected_params)}",
-                                initial_args={"data": filtered_data}
-                            ))
-                            
-                            # Get the last message from the agent
-                            if viz_result:
-                                result = viz_result[-1]
-                                if hasattr(result, 'content'):
-                                    result = result.content
-                                    # Try to parse as JSON if it's a string
-                                    if isinstance(result, str):
-                                        try:
-                                            result = json.loads(result)
-                                        except:
-                                            pass
-                            else:
-                                # Fallback to direct function call
-                                result = create_visualizations(filtered_data)
+                        if basic_agent:
+                            # Try to use the agent
+                            try:
+                                prompt = f"Create visualizations for these parameters: {', '.join(selected_params)}"
+                                result = basic_agent.run(
+                                    prompt,
+                                    create_visualizations={"data": filtered_data}
+                                )
+                                
+                                # Process result
+                                if isinstance(result, list) and len(result) > 0:
+                                    # Get the last message from the agent
+                                    last_result = result[-1]
+                                    if hasattr(last_result, 'content'):
+                                        visualization_data = last_result.content
+                                    else:
+                                        visualization_data = last_result
+                                else:
+                                    visualization_data = result
+                                
+                                # Convert to dict if it's a string
+                                if isinstance(visualization_data, str):
+                                    try:
+                                        visualization_data = json.loads(visualization_data)
+                                    except:
+                                        # Fallback to direct execution
+                                        visualization_data = execute_visualization(filtered_data)
+                            except Exception as e:
+                                st.warning(f"Error using agent: {str(e)}. Falling back to direct execution.")
+                                visualization_data = execute_visualization(filtered_data)
                         else:
-                            # Fallback to direct tool execution
-                            result = create_visualizations(filtered_data)
+                            # Direct execution
+                            visualization_data = execute_visualization(filtered_data)
                             
-                        st.session_state.visualization_data = result
+                        st.session_state.visualization_data = visualization_data
                     except Exception as e:
                         st.error(f"Error during visualization: {str(e)}\n{traceback.format_exc()}")
             
@@ -822,26 +811,44 @@ def main():
         if search_query and st.button("Search"):
             with st.spinner("Searching for information..."):
                 try:
-                    if search_agent and SMOLAGENTS_AVAILABLE:
-                        # Use the agent to perform search
-                        search_result = list(search_agent.agent.run(search_query))
-                        
-                        # Get the last message from the agent
-                        if search_result:
-                            result = search_result[-1]
-                            if hasattr(result, 'content'):
-                                result = result.content
-                            # Convert result to a list if needed
-                            if not isinstance(result, list):
-                                result = [{"title": "Search result", "snippet": str(result), "link": "#"}]
-                        else:
-                            # Fallback to direct search
-                            result = search_geotechnical_data(search_query)
+                    if basic_agent:
+                        # Try to use the agent
+                        try:
+                            result = basic_agent.run(
+                                search_query,
+                                search_geotechnical_data={"query": search_query}
+                            )
+                            
+                            # Process result
+                            if isinstance(result, list) and len(result) > 0:
+                                # Get the last message from the agent
+                                last_result = result[-1]
+                                if hasattr(last_result, 'content'):
+                                    search_results = last_result.content
+                                else:
+                                    search_results = last_result
+                            else:
+                                search_results = result
+                            
+                            # Convert to list if it's a string
+                            if isinstance(search_results, str):
+                                try:
+                                    search_results = json.loads(search_results)
+                                except:
+                                    # Fallback to list with message
+                                    search_results = [{"title": "Results", "snippet": search_results, "link": "#"}]
+                        except Exception as e:
+                            st.warning(f"Error using agent: {str(e)}. Falling back to direct search.")
+                            search_results = execute_search(search_query)
                     else:
-                        # Fallback when search functionality is unavailable
-                        result = search_geotechnical_data(search_query)
+                        # Direct search
+                        search_results = execute_search(search_query)
                         
-                    st.session_state.search_results = result
+                    # Ensure search_results is a list
+                    if not isinstance(search_results, list):
+                        search_results = [{"title": "Results", "snippet": str(search_results), "link": "#"}]
+                        
+                    st.session_state.search_results = search_results
                 except Exception as e:
                     st.error(f"Error during search: {str(e)}\n{traceback.format_exc()}")
                     st.session_state.search_results = [
