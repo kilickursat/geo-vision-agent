@@ -12,6 +12,12 @@ import json
 import requests
 from typing import List, Dict, Any, Union
 import smolagents
+from transformers import Qwen2VLForConditionalGeneration, AutoTokenizer, AutoProcessor
+from smolagents import tool, CodeAgent, HfApiModel, ManagedAgent, ToolCallingAgent, DuckDuckGoSearchTool
+import traceback
+from qwen_vl_utils import process_vision_info
+
+
 
 # Set page configuration - THIS MUST BE THE FIRST STREAMLIT COMMAND
 st.set_page_config(
