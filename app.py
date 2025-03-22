@@ -11,6 +11,7 @@ from PIL import Image
 import json
 import requests
 from typing import List, Dict, Any, Union
+import traceback
 
 # Set page configuration - THIS MUST BE THE FIRST STREAMLIT COMMAND
 st.set_page_config(
@@ -48,12 +49,13 @@ except ImportError:
             # Return a blank image as last resort
             return [Image.new('RGB', (612, 792), 'white')]
 
-# Import smolagents components
+# Import smolagents components with proper error handling
 try:
+    from huggingface_hub import login
     from smolagents import HfApiModel, CodeAgent, DuckDuckGoSearchTool, ToolMessage, AgentMessage, HumanMessage
     SMOLAGENTS_AVAILABLE = True
 except ImportError:
-    st.error("smolagents package is not available. Some functionality will be limited.")
+    st.warning("smolagents package is not available. Some functionality will be limited.")
     SMOLAGENTS_AVAILABLE = False
     # Create dummy classes/functions to prevent errors
     class HfApiModel:
@@ -83,27 +85,49 @@ except ImportError:
         def __init__(self, content):
             self.content = content
 
-# Function to get Hugging Face token
+# Function to get Hugging Face token with comprehensive checking
 def get_hf_token():
-    """Get Hugging Face token from environment variable or Streamlit secrets."""
-    # First check environment variable
+    """Get Hugging Face token from all possible sources."""
+    # Check in Streamlit secrets with various possible paths
+    if 'huggingface_token' in st.secrets:
+        return st.secrets["huggingface_token"]
+    elif 'huggingface' in st.secrets and 'hf_token' in st.secrets["huggingface"]:
+        return st.secrets["huggingface"]["hf_token"]
+    elif 'HF_TOKEN' in st.secrets:
+        return st.secrets["HF_TOKEN"]
+    
+    # Check environment variable
     token = os.getenv("HF_TOKEN")
+    if token:
+        return token
     
-    # Then check Streamlit secrets
-    if not token and 'huggingface' in st.secrets:
-        token = st.secrets["huggingface"]["hf_token"]
-    
-    # Finally, request from user if not found
+    # Request from user if not found
+    if "hf_token" not in st.session_state:
+        st.session_state.hf_token = st.text_input(
+            "Enter your Hugging Face API token:",
+            type="password",
+            help="Get your token from https://huggingface.co/settings/tokens"
+        )
+    return st.session_state.hf_token
+
+# Test token validity
+def test_token_validity(token):
+    """Test if the token has appropriate permissions."""
     if not token:
-        if "hf_token" not in st.session_state:
-            st.session_state.hf_token = st.text_input(
-                "Enter your Hugging Face API token:",
-                type="password",
-                help="Get your token from https://huggingface.co/settings/tokens"
-            )
-        token = st.session_state.hf_token
+        return False, "No token provided"
         
-    return token
+    # Test with a simple API endpoint that should be accessible
+    test_url = "https://api-inference.huggingface.co/models/gpt2"
+    headers = {"Authorization": f"Bearer {token}"}
+    
+    try:
+        response = requests.get(test_url, headers=headers)
+        if response.status_code == 200:
+            return True, "Token is valid"
+        else:
+            return False, f"Token validation failed with status code: {response.status_code}"
+    except Exception as e:
+        return False, f"Error validating token: {str(e)}"
 
 # Tool for extraction agent
 def extract_from_file(file_content: bytes, file_type: str) -> Dict[str, float]:
@@ -142,6 +166,12 @@ def extract_from_file(file_content: bytes, file_type: str) -> Dict[str, float]:
             st.error("Hugging Face token is required for parameter extraction.")
             return sample_geotechnical_data()
         
+        # Test token validity
+        token_valid, token_message = test_token_validity(token)
+        if not token_valid:
+            st.error(f"Token validation issue: {token_message}")
+            return sample_geotechnical_data()
+            
         # Prepare prompt for the VLM
         prompt = """
         Extract the following geotechnical parameters from this image if present:
@@ -158,28 +188,65 @@ def extract_from_file(file_content: bytes, file_type: str) -> Dict[str, float]:
         If a parameter is not found, don't include it in the result.
         """
         
-        # Make API request to Hugging Face Inference API for the vision model
-        try:
-            api_url = "https://api-inference.huggingface.co/models/Qwen/Qwen2.5-VL-72B-Instruct"
-            headers = {"Authorization": f"Bearer {token}"}
-            payload = {
-                "inputs": {
-                    "image": img_str,
-                    "text": prompt
-                }
-            }
-            
-            response = requests.post(api_url, headers=headers, json=payload)
-            
-            if response.status_code != 200:
-                st.warning(f"API request failed with status code {response.status_code}. Using sample data instead.")
-                return sample_geotechnical_data()
+        # Make API request to Hugging Face Inference API
+        # Try with multiple model options in case of permission issues
+        model_options = [
+            "Qwen/Qwen2.5-VL-72B-Instruct",
+            "Qwen/Qwen2.5-VL-7B-Instruct",  # Fallback to smaller model
+            "openai/clip-vit-base-patch32"  # Simple fallback model
+        ]
+        
+        result = None
+        last_error = None
+        
+        for model in model_options:
+            try:
+                api_url = f"https://api-inference.huggingface.co/models/{model}"
+                headers = {"Authorization": f"Bearer {token}"}
                 
-            result = response.json()
-            
-            # Parse the response - assuming it returns text that includes JSON
+                # Use different payload formats based on model
+                if "clip" in model.lower():
+                    # CLIP model has a different input format
+                    payload = {
+                        "image": img_str,
+                        "text": prompt
+                    }
+                else:
+                    # Standard VLM format
+                    payload = {
+                        "inputs": {
+                            "image": img_str,
+                            "text": prompt
+                        }
+                    }
+                
+                with st.status(f"Trying model: {model}..."):
+                    response = requests.post(api_url, headers=headers, json=payload, timeout=30)
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    st.success(f"Successfully used model: {model}")
+                    break
+                else:
+                    last_error = f"API request to {model} failed with status code {response.status_code}"
+                    st.warning(last_error)
+                    # Continue to next model
+            except Exception as e:
+                last_error = f"Error with model {model}: {str(e)}"
+                st.warning(last_error)
+                # Continue to next model
+                
+        # If all models failed
+        if result is None:
+            st.error(f"All API requests failed. Last error: {last_error}")
+            return sample_geotechnical_data()
+                
+        # Parse the response - assuming it returns text that includes JSON
+        try:
             if isinstance(result, list) and "generated_text" in result[0]:
                 text_response = result[0]["generated_text"]
+            elif isinstance(result, dict) and "generated_text" in result:
+                text_response = result["generated_text"]
             else:
                 text_response = str(result)
             
@@ -213,16 +280,16 @@ def extract_from_file(file_content: bytes, file_type: str) -> Dict[str, float]:
                     return sample_geotechnical_data()
                     
                 return params
-            except:
-                st.warning("Error parsing API response. Using sample data instead.")
+            except Exception as e:
+                st.warning(f"Error parsing API response: {str(e)}. Using sample data instead.")
                 return sample_geotechnical_data()
                 
         except Exception as e:
-            st.error(f"Error making API request: {str(e)}. Using sample data instead.")
+            st.error(f"Error processing API response: {str(e)}. Using sample data instead.")
             return sample_geotechnical_data()
             
     except Exception as e:
-        st.error(f"Error in extraction: {str(e)}")
+        st.error(f"Error in extraction: {str(e)}\n{traceback.format_exc()}")
         return sample_geotechnical_data()
 
 def sample_geotechnical_data():
@@ -359,16 +426,24 @@ def create_visualizations(data: Dict[str, float]) -> Dict[str, Any]:
             "error": f"Error in visualization: {str(e)}"
         }
 
-# Initialize models and agents
+# Initialize models and agents with improved error handling
 def initialize_model_and_agents(token):
     """Initialize the VLM model and all agents."""
     if not token or not SMOLAGENTS_AVAILABLE:
         return None, None, None, None, None
     
     try:
-        # Initialize the vision-language model
+        # First try to login with the token
+        if SMOLAGENTS_AVAILABLE:
+            try:
+                login(token=token)
+                st.success("Successfully authenticated with Hugging Face")
+            except Exception as e:
+                st.warning(f"Hugging Face login warning: {str(e)}")
+        
+        # Initialize the model with the proper token
         extraction_model = HfApiModel(
-            model_id="Qwen/Qwen2.5-VL-72B-Instruct",
+            model_id="Qwen/Qwen2.5-VL-7B-Instruct",  # Using smaller model to reduce chances of permission issues
             token=token,
             max_tokens=5000
         )
@@ -426,10 +501,10 @@ def initialize_model_and_agents(token):
         
         return extraction_agent, analyzer_agent, visualization_agent, search_agent, manager_agent
     except Exception as e:
-        st.error(f"Error initializing agents: {str(e)}")
+        st.error(f"Error initializing agents: {str(e)}\n{traceback.format_exc()}")
         return None, None, None, None, None
 
-# Streamlit sidebar
+# Streamlit sidebar with debug features
 def create_sidebar():
     """Create and configure the sidebar."""
     with st.sidebar:
@@ -437,11 +512,24 @@ def create_sidebar():
         st.subheader("Settings")
         
         # Settings options
-        advanced_options = st.checkbox("Show Advanced Options", False)
+        debug_mode = st.checkbox("Debug Mode", False)
         
-        if advanced_options:
-            st.write("Advanced settings go here")
+        if debug_mode:
+            st.subheader("Debug Information")
+            token = get_hf_token()
+            token_valid, token_message = test_token_validity(token)
             
+            # Display token information securely
+            st.write(f"Token available: {'Yes' if token else 'No'}")
+            if token:
+                masked_token = f"{token[:4]}...{token[-4:]}" if len(token) > 8 else "****"
+                st.write(f"Token: {masked_token}")
+                st.write(f"Token validity: {token_message}")
+            
+            # Display system information
+            st.write(f"smolagents available: {SMOLAGENTS_AVAILABLE}")
+            st.write(f"PDF to Image available: {PDF_TO_IMAGE_AVAILABLE}")
+        
         # Agent status
         st.subheader("Agent Status")
         
@@ -553,7 +641,7 @@ def main():
                             
                         st.session_state.extracted_data = result
                     except Exception as e:
-                        st.error(f"Error during extraction: {str(e)}")
+                        st.error(f"Error during extraction: {str(e)}\n{traceback.format_exc()}")
                         # Fallback to sample data
                         st.session_state.extracted_data = sample_geotechnical_data()
             
@@ -630,7 +718,7 @@ def main():
                             
                         st.session_state.correlation_data = result
                     except Exception as e:
-                        st.error(f"Error during analysis: {str(e)}")
+                        st.error(f"Error during analysis: {str(e)}\n{traceback.format_exc()}")
             
             # Display correlation panel
             if st.session_state.correlation_data:
@@ -701,7 +789,7 @@ def main():
                             
                         st.session_state.visualization_data = result
                     except Exception as e:
-                        st.error(f"Error during visualization: {str(e)}")
+                        st.error(f"Error during visualization: {str(e)}\n{traceback.format_exc()}")
             
             # Display visualizations
             if st.session_state.visualization_data:
@@ -768,7 +856,7 @@ def main():
                         
                     st.session_state.search_results = result
                 except Exception as e:
-                    st.error(f"Error during search: {str(e)}")
+                    st.error(f"Error during search: {str(e)}\n{traceback.format_exc()}")
                     st.session_state.search_results = [
                         {"title": "Search error", "snippet": f"An error occurred: {str(e)}", "link": "#"}
                     ]
