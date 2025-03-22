@@ -7,7 +7,7 @@ pandas
 numpy
 plotly
 python-dotenv
-
+statsmodels
 # Use alternative packages for PDF processing that have fewer dependencies
 PyPDF2
 Pillow
