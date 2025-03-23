@@ -113,7 +113,16 @@ def get_hf_token():
     
     # Then check Streamlit secrets
     if not token and 'huggingface' in st.secrets:
-        token = st.secrets["huggingface"]["api_token"]
+        # Try multiple possible key names
+        if "hf_token" in st.secrets["huggingface"]:
+            token = st.secrets["huggingface"]["hf_token"]
+        elif "api_token" in st.secrets["huggingface"]:
+            token = st.secrets["huggingface"]["api_token"]
+    
+    # If still not found, check if token is directly provided
+    if not token:
+        # Hardcoded token for testing (you should remove this in production)
+        token = "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"
     
     # Finally, request from user if not found
     if not token:
