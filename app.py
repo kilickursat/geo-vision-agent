@@ -156,20 +156,14 @@ def process_image(image: Image.Image, prompt: str) -> str:
         if not token:
             return "Error: Hugging Face token is required for image processing."
         
-        # Create API request - using simplified format as suggested
+        # Create API request
         api_url = "https://api-inference.huggingface.co/models/Qwen/Qwen2.5-VL-7B-Instruct"
+        headers = {"Authorization": f"Bearer {token}"}
         
-        # Add Content-Type header
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json"
-        }
-        
-        # Use the simplified HTML-embedded format
+        # Use the exact Markdown format for image + text as specified in the research document
         payload = {
-            "inputs": f"<img src=\"data:image/jpeg;base64,{image_b64}\"> {prompt}",
+            "inputs": f"![](data:image/jpeg;base64,{image_b64}) {prompt}",
             "parameters": {
-                "return_full_text": False,
                 "max_new_tokens": 512
             }
         }
@@ -188,10 +182,10 @@ def process_image(image: Image.Image, prompt: str) -> str:
         
         # Parse response
         result = response.json()
-        logging.info(f"API Response Body: {result}")
+        logging.info(f"API Response Body Type: {type(result)}")
         
         if isinstance(result, list) and len(result) > 0:
-            if "generated_text" in result[0]:
+            if isinstance(result[0], dict) and "generated_text" in result[0]:
                 return result[0]["generated_text"]
             else:
                 return str(result)
