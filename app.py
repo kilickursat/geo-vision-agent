@@ -14,9 +14,13 @@ from typing import List, Dict, Any, Union, Optional
 import traceback
 import logging
 import re
+import os
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
+
+# Fix for torch path watcher issue in Streamlit
+os.environ["STREAMLIT_WATCH_MODULES"] = "false"
 
 # Set page configuration - THIS MUST BE THE FIRST STREAMLIT COMMAND
 st.set_page_config(
@@ -220,7 +224,7 @@ def process_image(image: Image.Image, prompt: str) -> str:
         
         # Process inputs
         prompt_template = processor.apply_chat_template(messages, add_generation_prompt=True)
-        inputs = processor(text=prompt_template, images=[image], return_tensors="pt").to(device)
+        inputs = processor(text=prompt_template, images=[image], return_tensors="pt", truncation=True).to(device)
         
         # Generate DocTags representation
         with torch.no_grad():
