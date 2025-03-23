@@ -424,8 +424,7 @@ def create_visualizations(data: Dict[str, float]) -> Dict[str, Any]:
 # Tool for web search
 @tool
 def search_geotechnical_data(query: str) -> List[Dict[str, str]]:
-    """
-    Searches for geotechnical information using DuckDuckGo.
+    """Searches for geotechnical information using DuckDuckGo.
     
     Args:
         query: The search query for finding geotechnical information.
