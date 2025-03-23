@@ -1,5 +1,29 @@
-import streamlit as st
+import sys
+import types
 import os
+
+# Create a monkey patch for torch.classes to prevent Streamlit file watcher issues
+class TorchClassesModule(types.ModuleType):
+    def __init__(self):
+        super().__init__("torch.classes")
+        
+    def __getattr__(self, attr):
+        if attr == "__path__":
+            # Return a simple object with _path attribute that won't trigger __getattr__
+            class Path:
+                _path = []
+            return Path()
+        raise AttributeError(f"module 'torch.classes' has no attribute '{attr}'")
+
+# Apply the patch before any imports
+sys.modules["torch.classes"] = TorchClassesModule()
+
+# Completely disable Streamlit's file watcher
+os.environ["STREAMLIT_WATCH_MODULES"] = "false"
+os.environ["STREAMLIT_SERVER_WATCH_DIRS"] = "false"
+
+# Standard imports that don't cause conflicts
+import streamlit as st
 import io
 import base64
 import tempfile
@@ -17,10 +41,6 @@ import re
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
-
-# Disable Streamlit's file watcher to prevent torch module issues
-os.environ["STREAMLIT_WATCH_MODULES"] = "false"
-os.environ["STREAMLIT_SERVER_WATCH_DIRS"] = "false"
 
 # Set page configuration - THIS MUST BE THE FIRST STREAMLIT COMMAND
 st.set_page_config(
@@ -58,28 +78,6 @@ except ImportError:
             # Return a blank image as last resort
             return [Image.new('RGB', (612, 792), 'white')]
 
-# Defer SmolDocling imports to prevent module watching issues
-SMOLDOCLING_AVAILABLE = False
-
-def check_smoldocling_availability():
-    """Check if SmolDocling dependencies are available."""
-    global SMOLDOCLING_AVAILABLE
-    try:
-        import torch
-        import transformers
-        try:
-            import docling_core
-            SMOLDOCLING_AVAILABLE = True
-            logging.info("Successfully imported SmolDocling dependencies")
-        except ImportError:
-            logging.error("docling_core not found - SmolDocling functionality limited")
-    except ImportError as e:
-        logging.error(f"Error importing SmolDocling dependencies: {str(e)}")
-    return SMOLDOCLING_AVAILABLE
-
-# Check availability without actually importing at module level
-SMOLDOCLING_AVAILABLE = check_smoldocling_availability()
-
 # Import smolagents components with careful fallbacks
 SMOLAGENTS_AVAILABLE = False
 HF_LOGIN_AVAILABLE = False
@@ -101,7 +99,6 @@ try:
     
 except ImportError as e:
     logging.error(f"Error importing smolagents: {str(e)}")
-    st.error(f"smolagents package is not available: {str(e)}. Using fallback methods.")
     
     # Create dummy classes/functions to prevent errors
     def tool(func):
@@ -158,141 +155,28 @@ def get_hf_token():
         
     return token
 
-# Initialize SmolDocling model and processor
-@st.cache_resource
-def load_smoldocling_model():
-    """Load SmolDocling model and processor."""
-    try:
-        if not SMOLDOCLING_AVAILABLE:
-            return None, None
-        
-        # Import here to avoid module watching issues
-        import torch
-        from transformers import AutoProcessor, AutoModelForVision2Seq
-            
-        # Initialize model components
-        processor = AutoProcessor.from_pretrained("ds4sd/SmolDocling-256M-preview")
-        
-        # Check if CUDA is available
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        
-        model = AutoModelForVision2Seq.from_pretrained(
-            "ds4sd/SmolDocling-256M-preview",
-            torch_dtype=torch.float32,  # Use float32 for better compatibility
-            _attn_implementation="eager",  # Use eager for better compatibility
-        ).to(device)
-        
-        logging.info(f"SmolDocling model loaded successfully on {device}")
-        return processor, model
-    except Exception as e:
-        logging.error(f"Error loading SmolDocling model: {str(e)}")
-        return None, None
-
-# Tool for image processing with SmolDocling
+# SmolDocling API implementation 
 @tool
-def process_image(image: Image.Image, prompt: str) -> str:
-    """
-    Process an image with a given prompt using SmolDocling vision-language model.
+def process_image_api(image: Image.Image, prompt: str) -> str:
+    """Use SmolDocling API to process an image with a given prompt.
     
     Args:
         image: The image to process
-        prompt: The prompt for the vision-language model
+        prompt: The prompt for SmolDocling
         
     Returns:
         Extracted text from the image based on the prompt
     """
     try:
-        # Check if SmolDocling is available
-        if not SMOLDOCLING_AVAILABLE:
-            return "Error: SmolDocling dependencies are not available."
-        
-        # Import dependencies inside function to avoid module watching issues
-        import torch
-        from transformers import AutoProcessor, AutoModelForVision2Seq
-        
-        try:
-            from docling_core.types.doc import DoclingDocument
-            from docling_core.types.doc.document import DocTagsDocument
-        except ImportError:
-            return "Error: docling_core dependencies not available."
-        
-        # Get token for model authentication if needed
-        token = get_hf_token()
-        if not token:
-            return "Error: Hugging Face token is required for image processing."
-            
-        # Load SmolDocling model and processor
-        processor, model = load_smoldocling_model()
-        if processor is None or model is None:
-            return "Error: Failed to load SmolDocling model or processor."
-        
-        # Prepare the device
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-            
-        # Create input messages
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image"},
-                    {"type": "text", "text": prompt}
-                ]
-            }
-        ]
-        
-        try:
-            # Process inputs
-            prompt_template = processor.apply_chat_template(messages, add_generation_prompt=True)
-            inputs = processor(text=prompt_template, images=[image], return_tensors="pt", truncation=True).to(device)
-            
-            # Generate DocTags representation - with simpler settings
-            with torch.no_grad():
-                generated_ids = model.generate(
-                    **inputs, 
-                    max_new_tokens=4096,  # Reduce token count for stability
-                    do_sample=False,     # Deterministic generation
-                    num_beams=1          # No beam search for speed and stability
-                )
-                
-            # Extract generated text
-            prompt_length = inputs.input_ids.shape[1]
-            trimmed_generated_ids = generated_ids[:, prompt_length:]
-            doctags = processor.batch_decode(
-                trimmed_generated_ids,
-                skip_special_tokens=False,
-            )[0].lstrip()
-            
-            # Convert to Docling document if possible
-            try:
-                doctags_doc = DocTagsDocument.from_doctags_and_image_pairs([doctags], [image])
-                doc = DoclingDocument(name="Document")
-                doc.load_from_doctags(doctags_doc)
-                
-                # Export as markdown which is easier to parse
-                markdown_content = doc.export_to_markdown()
-                return markdown_content
-            except Exception as e:
-                logging.error(f"Error converting to Docling document: {str(e)}")
-                # Return raw DocTags as fallback
-                return doctags
-        except RuntimeError as e:
-            if "CUDA out of memory" in str(e):
-                return "Error: CUDA out of memory. Try processing a smaller image or using CPU mode."
-            else:
-                raise e
-    
-    except Exception as e:
-        error_msg = f"Error processing image: {str(e)}\n{traceback.format_exc()}"
-        logging.error(error_msg)
-        return error_msg
-
-# Fallback function for API processing
-def process_image_api_fallback(image: Image.Image, prompt: str) -> str:
-    """Fallback to use the Hugging Face Inference API instead of local model."""
-    try:
         # Convert image to base64
         buffered = io.BytesIO()
-        image.save(buffered, format="JPEG")
+        # Resize image if it's too large (to avoid timeouts)
+        max_size = (1200, 1200)
+        if image.width > max_size[0] or image.height > max_size[1]:
+            image = image.copy()  # Create a copy to avoid modifying original
+            image.thumbnail(max_size, Image.LANCZOS)
+            
+        image.save(buffered, format="JPEG", quality=95)
         img_bytes = buffered.getvalue()
         image_b64 = base64.b64encode(img_bytes).decode()
         
@@ -305,19 +189,28 @@ def process_image_api_fallback(image: Image.Image, prompt: str) -> str:
         api_url = "https://api-inference.huggingface.co/models/ds4sd/SmolDocling-256M-preview"
         headers = {"Authorization": f"Bearer {token}"}
         
-        # Format payload with image and prompt
+        # Format the messages in the format SmolDocling expects
+        messages = [
+            {
+                "role": "user", 
+                "content": [
+                    {"type": "image"},
+                    {"type": "text", "text": prompt}
+                ]
+            }
+        ]
+        
+        # Format payload with image and prompt using the expected format
         payload = {
-            "inputs": {
-                "image": image_b64,
-                "text": prompt
-            },
+            "inputs": f"![](data:image/jpeg;base64,{image_b64}) {prompt}",
             "parameters": {
-                "max_new_tokens": 4096
+                "max_new_tokens": 4096,
+                "do_sample": False
             }
         }
         
         # Make the API request with increased timeout
-        response = requests.post(api_url, headers=headers, json=payload, timeout=60)
+        response = requests.post(api_url, headers=headers, json=payload, timeout=120)
         
         # Log the response for debugging
         logging.info(f"API Response Status: {response.status_code}")
@@ -329,10 +222,20 @@ def process_image_api_fallback(image: Image.Image, prompt: str) -> str:
             return error_text
         
         # Return the response text
-        return response.json()[0]["generated_text"]
+        result = response.json()
+        
+        if isinstance(result, list) and len(result) > 0:
+            if isinstance(result[0], dict) and "generated_text" in result[0]:
+                return result[0]["generated_text"]
+            else:
+                return str(result)
+        elif isinstance(result, dict) and "generated_text" in result:
+            return result["generated_text"]
+        else:
+            return str(result)
         
     except Exception as e:
-        error_msg = f"Error using API fallback: {str(e)}\n{traceback.format_exc()}"
+        error_msg = f"Error using API: {str(e)}\n{traceback.format_exc()}"
         logging.error(error_msg)
         return error_msg
 
@@ -374,19 +277,8 @@ def extract_from_file(file_content: bytes, file_type: str) -> Dict[str, float]:
         - Friction Angle (φ) in degrees
         """
         
-        try:
-            # First try with local model
-            response_text = process_image(image, prompt)
-            
-            # Check if we got an error
-            if response_text.startswith("Error:"):
-                st.warning("Local model processing failed, trying API fallback...")
-                # Try with API fallback
-                response_text = process_image_api_fallback(image, prompt)
-        except Exception as e:
-            st.warning(f"Local model processing failed: {str(e)}, trying API fallback...")
-            # Try with API fallback
-            response_text = process_image_api_fallback(image, prompt)
+        # Process the image using SmolDocling API
+        response_text = process_image_api(image, prompt)
         
         # Extract parameters from the response
         try:
@@ -687,10 +579,8 @@ def create_sidebar():
             
             # Display system information
             st.write(f"smolagents available: {SMOLAGENTS_AVAILABLE}")
-            st.write(f"SmolDocling available: {SMOLDOCLING_AVAILABLE}")
             st.write(f"PDF to Image available: {PDF_TO_IMAGE_AVAILABLE}")
             st.write(f"HF Login available: {HF_LOGIN_AVAILABLE}")
-            st.write(f"Device: {'CUDA' if 'torch' in globals() and torch.cuda.is_available() else 'CPU'}" if 'torch' in globals() else "Device: Unknown")
         
         # Information
         st.subheader("Information")
@@ -702,10 +592,7 @@ def create_sidebar():
         
         # Show mode
         st.subheader("Mode")
-        if SMOLDOCLING_AVAILABLE:
-            st.success("✅ SmolDocling integration available")
-        else:
-            st.warning("⚠️ SmolDocling not available (missing dependencies)")
+        st.info("💡 Using SmolDocling API for document processing")
             
         if SMOLAGENTS_AVAILABLE:
             st.success("✅ SmolaAgent integration available")
