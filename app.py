@@ -13,6 +13,7 @@ import requests
 from typing import List, Dict, Any, Union, Optional
 import traceback
 import logging
+import re
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -52,6 +53,24 @@ except ImportError:
             st.error(f"Error converting PDF to image: {str(e)}")
             # Return a blank image as last resort
             return [Image.new('RGB', (612, 792), 'white')]
+
+# Try to import SmolDocling dependencies
+SMOLDOCLING_AVAILABLE = False
+try:
+    import torch
+    from transformers import AutoProcessor, AutoModelForVision2Seq
+    from transformers.image_utils import load_image
+    
+    # Check if docling_core is available
+    try:
+        from docling_core.types.doc import DoclingDocument
+        from docling_core.types.doc.document import DocTagsDocument
+        SMOLDOCLING_AVAILABLE = True
+        logging.info("Successfully imported SmolDocling dependencies")
+    except ImportError:
+        logging.error("docling_core not found - SmolDocling functionality limited")
+except ImportError as e:
+    logging.error(f"Error importing SmolDocling dependencies: {str(e)}")
 
 # Import smolagents components with careful fallbacks
 SMOLAGENTS_AVAILABLE = False
@@ -131,11 +150,37 @@ def get_hf_token():
         
     return token
 
-# Tool for image processing
+# Initialize SmolDocling model and processor
+@st.cache_resource
+def load_smoldocling_model():
+    """Load SmolDocling model and processor."""
+    try:
+        if not SMOLDOCLING_AVAILABLE:
+            return None, None
+            
+        # Initialize model components
+        processor = AutoProcessor.from_pretrained("ds4sd/SmolDocling-256M-preview")
+        
+        # Check if CUDA is available
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        
+        model = AutoModelForVision2Seq.from_pretrained(
+            "ds4sd/SmolDocling-256M-preview",
+            torch_dtype=torch.bfloat16 if device == "cuda" else torch.float32,
+            _attn_implementation="flash_attention_2" if device == "cuda" else "eager",
+        ).to(device)
+        
+        logging.info(f"SmolDocling model loaded successfully on {device}")
+        return processor, model
+    except Exception as e:
+        logging.error(f"Error loading SmolDocling model: {str(e)}")
+        return None, None
+
+# Tool for image processing with SmolDocling
 @tool
 def process_image(image: Image.Image, prompt: str) -> str:
     """
-    Process an image with a given prompt using vision-language models.
+    Process an image with a given prompt using SmolDocling vision-language model.
     
     Args:
         image: The image to process
@@ -145,57 +190,63 @@ def process_image(image: Image.Image, prompt: str) -> str:
         Extracted text from the image based on the prompt
     """
     try:
-        # Convert image to base64
-        buffered = io.BytesIO()
-        image.save(buffered, format="JPEG")
-        img_bytes = buffered.getvalue()
-        image_b64 = base64.b64encode(img_bytes).decode()
+        # Check if SmolDocling is available
+        if not SMOLDOCLING_AVAILABLE:
+            return "Error: SmolDocling dependencies are not available."
         
-        # Get token
+        # Get token for model authentication if needed
         token = get_hf_token()
         if not token:
             return "Error: Hugging Face token is required for image processing."
+            
+        # Load SmolDocling model and processor
+        processor, model = load_smoldocling_model()
+        if processor is None or model is None:
+            return "Error: Failed to load SmolDocling model or processor."
         
-        # Create API request
-        api_url = "https://api-inference.huggingface.co/models/Qwen/Qwen2.5-VL-7B-Instruct"
-        headers = {"Authorization": f"Bearer {token}"}
-        
-        # Use the exact Markdown format for image + text as specified in the research document
-        payload = {
-            "inputs": f"![](data:image/jpeg;base64,{image_b64}) {prompt}",
-            "parameters": {
-                "max_new_tokens": 512
+        # Prepare the device
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+            
+        # Create input messages
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image"},
+                    {"type": "text", "text": prompt}
+                ]
             }
-        }
+        ]
         
-        # Make the API request with increased timeout
-        response = requests.post(api_url, headers=headers, json=payload, timeout=60)
+        # Process inputs
+        prompt_template = processor.apply_chat_template(messages, add_generation_prompt=True)
+        inputs = processor(text=prompt_template, images=[image], return_tensors="pt").to(device)
         
-        # Log the response for debugging
-        logging.info(f"API Response Status: {response.status_code}")
+        # Generate DocTags representation
+        with torch.no_grad():
+            generated_ids = model.generate(**inputs, max_new_tokens=8192)
+            
+        # Extract generated text
+        prompt_length = inputs.input_ids.shape[1]
+        trimmed_generated_ids = generated_ids[:, prompt_length:]
+        doctags = processor.batch_decode(
+            trimmed_generated_ids,
+            skip_special_tokens=False,
+        )[0].lstrip()
         
-        # Check for errors
-        if response.status_code != 200:
-            error_text = f"Error: API request failed with status code {response.status_code}. Response: {response.text}"
-            logging.error(error_text)
-            return error_text
-        
-        # Parse response
-        result = response.json()
-        logging.info(f"API Response Body Type: {type(result)}")
-        
-        if isinstance(result, list) and len(result) > 0:
-            if isinstance(result[0], dict) and "generated_text" in result[0]:
-                return result[0]["generated_text"]
-            else:
-                return str(result)
-        elif isinstance(result, dict):
-            if "generated_text" in result:
-                return result["generated_text"]
-            else:
-                return str(result)
-        else:
-            return str(result)
+        # Convert to Docling document if possible
+        try:
+            doctags_doc = DocTagsDocument.from_doctags_and_image_pairs([doctags], [image])
+            doc = DoclingDocument(name="Document")
+            doc.load_from_doctags(doctags_doc)
+            
+            # Export as markdown which is easier to parse
+            markdown_content = doc.export_to_markdown()
+            return markdown_content
+        except Exception as e:
+            logging.error(f"Error converting to Docling document: {str(e)}")
+            # Return raw DocTags as fallback
+            return doctags
     
     except Exception as e:
         error_msg = f"Error processing image: {str(e)}\n{traceback.format_exc()}"
@@ -227,9 +278,9 @@ def extract_from_file(file_content: bytes, file_type: str) -> Dict[str, float]:
         else:
             image = Image.open(io.BytesIO(file_content))
         
-        # Prepare prompt for the VLM
+        # Prepare prompt for SmolDocling
         prompt = """
-        Extract the following geotechnical parameters from this image if present:
+        Convert this page to docling. Focus on identifying any geotechnical parameters such as:
         - Uniaxial Compressive Strength (UCS) in MPa
         - Brazilian Tensile Strength (BTS) in MPa
         - Rock Mass Rating (RMR)
@@ -238,47 +289,58 @@ def extract_from_file(file_content: bytes, file_type: str) -> Dict[str, float]:
         - Poisson's Ratio (ν)
         - Cohesion (c) in MPa
         - Friction Angle (φ) in degrees
-        
-        Return the results as a JSON object with parameter names as keys and numerical values (without units).
-        If a parameter is not found, don't include it in the result.
         """
         
-        # Process the image using our tool
+        # Process the image using SmolDocling
         response_text = process_image(image, prompt)
         
         # Extract parameters from the response
         try:
-            # Try to find a JSON object in the response
-            import re
-            json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
-            if json_match:
-                extracted_json = json_match.group(0)
-                params = json.loads(extracted_json)
-                return params
+            # Parameters to look for with their regex patterns
+            param_patterns = {
+                "UCS": r"(?:Uniaxial\s+Compressive\s+Strength|UCS).*?(\d+\.?\d*)\s*(?:MPa|MPa\b)",
+                "BTS": r"(?:Brazilian\s+Tensile\s+Strength|BTS).*?(\d+\.?\d*)\s*(?:MPa|MPa\b)",
+                "RMR": r"(?:Rock\s+Mass\s+Rating|RMR).*?(\d+\.?\d*)",
+                "GSI": r"(?:Geological\s+Strength\s+Index|GSI).*?(\d+\.?\d*)",
+                "E": r"(?:Young['']s\s+Modulus|E).*?(\d+\.?\d*)\s*(?:GPa|GPa\b)",
+                "ν": r"(?:Poisson['']s\s+Ratio|ν).*?(\d+\.?\d*)",
+                "c": r"(?:Cohesion|c).*?(\d+\.?\d*)\s*(?:MPa|MPa\b)",
+                "φ": r"(?:Friction\s+Angle|φ).*?(\d+\.?\d*)\s*(?:degrees|°|deg)"
+            }
             
-            # Fallback parsing for structured text that isn't proper JSON
+            # Extract parameters
             params = {}
-            lines = response_text.split('\n')
-            for line in lines:
-                if ':' in line:
-                    key, value = line.split(':', 1)
-                    key = key.strip().replace('"', '')
-                    try:
-                        # Extract numeric values
-                        value_match = re.search(r'\d+\.?\d*', value)
-                        if value_match:
-                            params[key] = float(value_match.group(0))
-                    except:
-                        pass
+            for param, pattern in param_patterns.items():
+                matches = re.findall(pattern, response_text, re.IGNORECASE)
+                if matches:
+                    params[param] = float(matches[0])
             
-            # If no parameters were extracted, return sample data
-            if not params:
+            # If no parameters were extracted, try looking for tables
+            if not params and "table" in response_text.lower():
+                # Extract tables
+                table_pattern = r"\|(.+?)\|(.+?)\|"
+                table_matches = re.findall(table_pattern, response_text)
+                
+                for match in table_matches:
+                    key = match[0].strip()
+                    value = match[1].strip()
+                    
+                    # Check if key is one of our parameters
+                    for param, pattern in param_patterns.items():
+                        if re.search(param, key, re.IGNORECASE) or re.search(r"UCS|BTS|RMR|GSI|Young|Poisson|Cohesion|Friction", key, re.IGNORECASE):
+                            # Extract numerical value
+                            value_match = re.search(r"(\d+\.?\d*)", value)
+                            if value_match:
+                                params[param] = float(value_match.group(1))
+            
+            # If parameters were found, return them; otherwise, return sample data
+            if params:
+                return params
+            else:
                 return sample_geotechnical_data()
                 
-            return params
-                
         except Exception as e:
-            st.error(f"Error parsing response: {str(e)}")
+            logging.error(f"Error parsing response: {str(e)}")
             return sample_geotechnical_data()
             
     except Exception as e:
@@ -455,9 +517,9 @@ def initialize_agents(token):
         if HF_LOGIN_AVAILABLE:
             login(token)
         
-        # Initialize the model - use Qwen2.5-VL-7B-Instruct as specified
+        # Initialize the model - use a smaller text-only model to coordinate agents
         model = HfApiModel(
-            model_id="Qwen/Qwen2.5-VL-7B-Instruct",
+            model_id="mistralai/Mistral-7B-Instruct-v0.2",
             token=token,
             timeout=120  # Adjusted timeout
         )
@@ -525,8 +587,10 @@ def create_sidebar():
             
             # Display system information
             st.write(f"smolagents available: {SMOLAGENTS_AVAILABLE}")
+            st.write(f"SmolDocling available: {SMOLDOCLING_AVAILABLE}")
             st.write(f"PDF to Image available: {PDF_TO_IMAGE_AVAILABLE}")
             st.write(f"HF Login available: {HF_LOGIN_AVAILABLE}")
+            st.write(f"Device: {'CUDA' if torch.cuda.is_available() else 'CPU'}" if 'torch' in globals() else "Device: Unknown")
         
         # Information
         st.subheader("Information")
@@ -538,6 +602,11 @@ def create_sidebar():
         
         # Show mode
         st.subheader("Mode")
+        if SMOLDOCLING_AVAILABLE:
+            st.success("✅ SmolDocling integration available")
+        else:
+            st.warning("⚠️ SmolDocling not available (missing dependencies)")
+            
         if SMOLAGENTS_AVAILABLE:
             st.success("✅ SmolaAgent integration available")
         else:
