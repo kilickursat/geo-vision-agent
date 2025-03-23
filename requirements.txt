@@ -16,5 +16,5 @@ qwen-vl-utils
 setuptools
 
 # Optional: Only include if absolutely needed
-# pdf2image
-# python-magic
+pdf2image
+python-magic
