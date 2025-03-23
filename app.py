@@ -130,7 +130,8 @@ def get_hf_token():
 # Tool for image processing
 @tool
 def process_image(image: Image.Image, prompt: str) -> str:
-    """Process an image with a given prompt using vision-language models.
+    """
+    Process an image with a given prompt using vision-language models.
     
     Args:
         image: The image to process
@@ -287,7 +288,15 @@ def sample_geotechnical_data():
 # Tool for analyzer
 @tool
 def create_correlation_panel(data: Dict[str, float]) -> Dict[str, Any]:
-    """Create a correlation panel from extracted data."""
+    """
+    Create a correlation panel from extracted data.
+    
+    Args:
+        data: Dictionary of extracted parameters
+        
+    Returns:
+        Dictionary with correlation matrix and figure data
+    """
     try:
         # Convert dictionary to dataframe
         df = pd.DataFrame([data])
@@ -330,7 +339,15 @@ def create_correlation_panel(data: Dict[str, float]) -> Dict[str, Any]:
 # Tool for visualization
 @tool
 def create_visualizations(data: Dict[str, float]) -> Dict[str, Any]:
-    """Create visualizations from extracted data."""
+    """
+    Create visualizations from extracted data.
+    
+    Args:
+        data: Dictionary of extracted parameters
+        
+    Returns:
+        Dictionary with visualization figures
+    """
     try:
         # Convert to dataframe
         df = pd.DataFrame([data])
@@ -394,7 +411,14 @@ def create_visualizations(data: Dict[str, float]) -> Dict[str, Any]:
 # Tool for web search
 @tool
 def search_geotechnical_data(query: str) -> List[Dict[str, str]]:
-    """Searches for geotechnical information using DuckDuckGo."""
+    """
+    Searches for geotechnical information using DuckDuckGo.
+    
+    Args:
+        query: The search query for finding geotechnical information.
+    Returns:
+        List of search results as dictionaries.
+    """
     try:
         if not SMOLAGENTS_AVAILABLE:
             return [
