@@ -14,13 +14,13 @@ from typing import List, Dict, Any, Union, Optional
 import traceback
 import logging
 import re
-import os
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 
-# Fix for torch path watcher issue in Streamlit
+# Disable Streamlit's file watcher to prevent torch module issues
 os.environ["STREAMLIT_WATCH_MODULES"] = "false"
+os.environ["STREAMLIT_SERVER_WATCH_DIRS"] = "false"
 
 # Set page configuration - THIS MUST BE THE FIRST STREAMLIT COMMAND
 st.set_page_config(
@@ -58,23 +58,27 @@ except ImportError:
             # Return a blank image as last resort
             return [Image.new('RGB', (612, 792), 'white')]
 
-# Try to import SmolDocling dependencies
+# Defer SmolDocling imports to prevent module watching issues
 SMOLDOCLING_AVAILABLE = False
-try:
-    import torch
-    from transformers import AutoProcessor, AutoModelForVision2Seq
-    from transformers.image_utils import load_image
-    
-    # Check if docling_core is available
+
+def check_smoldocling_availability():
+    """Check if SmolDocling dependencies are available."""
+    global SMOLDOCLING_AVAILABLE
     try:
-        from docling_core.types.doc import DoclingDocument
-        from docling_core.types.doc.document import DocTagsDocument
-        SMOLDOCLING_AVAILABLE = True
-        logging.info("Successfully imported SmolDocling dependencies")
-    except ImportError:
-        logging.error("docling_core not found - SmolDocling functionality limited")
-except ImportError as e:
-    logging.error(f"Error importing SmolDocling dependencies: {str(e)}")
+        import torch
+        import transformers
+        try:
+            import docling_core
+            SMOLDOCLING_AVAILABLE = True
+            logging.info("Successfully imported SmolDocling dependencies")
+        except ImportError:
+            logging.error("docling_core not found - SmolDocling functionality limited")
+    except ImportError as e:
+        logging.error(f"Error importing SmolDocling dependencies: {str(e)}")
+    return SMOLDOCLING_AVAILABLE
+
+# Check availability without actually importing at module level
+SMOLDOCLING_AVAILABLE = check_smoldocling_availability()
 
 # Import smolagents components with careful fallbacks
 SMOLAGENTS_AVAILABLE = False
@@ -282,6 +286,56 @@ def process_image(image: Image.Image, prompt: str) -> str:
         logging.error(error_msg)
         return error_msg
 
+# Fallback function for API processing
+def process_image_api_fallback(image: Image.Image, prompt: str) -> str:
+    """Fallback to use the Hugging Face Inference API instead of local model."""
+    try:
+        # Convert image to base64
+        buffered = io.BytesIO()
+        image.save(buffered, format="JPEG")
+        img_bytes = buffered.getvalue()
+        image_b64 = base64.b64encode(img_bytes).decode()
+        
+        # Get token
+        token = get_hf_token()
+        if not token:
+            return "Error: Hugging Face token is required for image processing."
+        
+        # Create API request
+        api_url = "https://api-inference.huggingface.co/models/ds4sd/SmolDocling-256M-preview"
+        headers = {"Authorization": f"Bearer {token}"}
+        
+        # Format payload with image and prompt
+        payload = {
+            "inputs": {
+                "image": image_b64,
+                "text": prompt
+            },
+            "parameters": {
+                "max_new_tokens": 4096
+            }
+        }
+        
+        # Make the API request with increased timeout
+        response = requests.post(api_url, headers=headers, json=payload, timeout=60)
+        
+        # Log the response for debugging
+        logging.info(f"API Response Status: {response.status_code}")
+        
+        # Check for errors
+        if response.status_code != 200:
+            error_text = f"Error: API request failed with status code {response.status_code}. Response: {response.text}"
+            logging.error(error_text)
+            return error_text
+        
+        # Return the response text
+        return response.json()[0]["generated_text"]
+        
+    except Exception as e:
+        error_msg = f"Error using API fallback: {str(e)}\n{traceback.format_exc()}"
+        logging.error(error_msg)
+        return error_msg
+
 # Tool for extracting geotechnical parameters from documents
 @tool
 def extract_from_file(file_content: bytes, file_type: str) -> Dict[str, float]:
@@ -359,7 +413,7 @@ def extract_from_file(file_content: bytes, file_type: str) -> Dict[str, float]:
                     params[param] = float(matches[0])
             
             # If no parameters were extracted, try looking for tables
-            if not params and "table" in response_text.lower() or "|" in response_text:
+            if not params and ("table" in response_text.lower() or "|" in response_text):
                 # Extract tables
                 table_pattern = r"\|(.+?)\|(.+?)\|"
                 table_matches = re.findall(table_pattern, response_text)
@@ -636,7 +690,7 @@ def create_sidebar():
             st.write(f"SmolDocling available: {SMOLDOCLING_AVAILABLE}")
             st.write(f"PDF to Image available: {PDF_TO_IMAGE_AVAILABLE}")
             st.write(f"HF Login available: {HF_LOGIN_AVAILABLE}")
-            st.write(f"Device: {'CUDA' if torch.cuda.is_available() else 'CPU'}" if 'torch' in globals() else "Device: Unknown")
+            st.write(f"Device: {'CUDA' if 'torch' in globals() and torch.cuda.is_available() else 'CPU'}" if 'torch' in globals() else "Device: Unknown")
         
         # Information
         st.subheader("Information")
