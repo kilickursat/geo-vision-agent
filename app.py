@@ -161,6 +161,10 @@ def load_smoldocling_model():
     try:
         if not SMOLDOCLING_AVAILABLE:
             return None, None
+        
+        # Import here to avoid module watching issues
+        import torch
+        from transformers import AutoProcessor, AutoModelForVision2Seq
             
         # Initialize model components
         processor = AutoProcessor.from_pretrained("ds4sd/SmolDocling-256M-preview")
@@ -170,8 +174,8 @@ def load_smoldocling_model():
         
         model = AutoModelForVision2Seq.from_pretrained(
             "ds4sd/SmolDocling-256M-preview",
-            torch_dtype=torch.bfloat16 if device == "cuda" else torch.float32,
-            _attn_implementation="flash_attention_2" if device == "cuda" else "eager",
+            torch_dtype=torch.float32,  # Use float32 for better compatibility
+            _attn_implementation="eager",  # Use eager for better compatibility
         ).to(device)
         
         logging.info(f"SmolDocling model loaded successfully on {device}")
@@ -198,6 +202,16 @@ def process_image(image: Image.Image, prompt: str) -> str:
         if not SMOLDOCLING_AVAILABLE:
             return "Error: SmolDocling dependencies are not available."
         
+        # Import dependencies inside function to avoid module watching issues
+        import torch
+        from transformers import AutoProcessor, AutoModelForVision2Seq
+        
+        try:
+            from docling_core.types.doc import DoclingDocument
+            from docling_core.types.doc.document import DocTagsDocument
+        except ImportError:
+            return "Error: docling_core dependencies not available."
+        
         # Get token for model authentication if needed
         token = get_hf_token()
         if not token:
@@ -222,35 +236,46 @@ def process_image(image: Image.Image, prompt: str) -> str:
             }
         ]
         
-        # Process inputs
-        prompt_template = processor.apply_chat_template(messages, add_generation_prompt=True)
-        inputs = processor(text=prompt_template, images=[image], return_tensors="pt", truncation=True).to(device)
-        
-        # Generate DocTags representation
-        with torch.no_grad():
-            generated_ids = model.generate(**inputs, max_new_tokens=8192)
-            
-        # Extract generated text
-        prompt_length = inputs.input_ids.shape[1]
-        trimmed_generated_ids = generated_ids[:, prompt_length:]
-        doctags = processor.batch_decode(
-            trimmed_generated_ids,
-            skip_special_tokens=False,
-        )[0].lstrip()
-        
-        # Convert to Docling document if possible
         try:
-            doctags_doc = DocTagsDocument.from_doctags_and_image_pairs([doctags], [image])
-            doc = DoclingDocument(name="Document")
-            doc.load_from_doctags(doctags_doc)
+            # Process inputs
+            prompt_template = processor.apply_chat_template(messages, add_generation_prompt=True)
+            inputs = processor(text=prompt_template, images=[image], return_tensors="pt", truncation=True).to(device)
             
-            # Export as markdown which is easier to parse
-            markdown_content = doc.export_to_markdown()
-            return markdown_content
-        except Exception as e:
-            logging.error(f"Error converting to Docling document: {str(e)}")
-            # Return raw DocTags as fallback
-            return doctags
+            # Generate DocTags representation - with simpler settings
+            with torch.no_grad():
+                generated_ids = model.generate(
+                    **inputs, 
+                    max_new_tokens=4096,  # Reduce token count for stability
+                    do_sample=False,     # Deterministic generation
+                    num_beams=1          # No beam search for speed and stability
+                )
+                
+            # Extract generated text
+            prompt_length = inputs.input_ids.shape[1]
+            trimmed_generated_ids = generated_ids[:, prompt_length:]
+            doctags = processor.batch_decode(
+                trimmed_generated_ids,
+                skip_special_tokens=False,
+            )[0].lstrip()
+            
+            # Convert to Docling document if possible
+            try:
+                doctags_doc = DocTagsDocument.from_doctags_and_image_pairs([doctags], [image])
+                doc = DoclingDocument(name="Document")
+                doc.load_from_doctags(doctags_doc)
+                
+                # Export as markdown which is easier to parse
+                markdown_content = doc.export_to_markdown()
+                return markdown_content
+            except Exception as e:
+                logging.error(f"Error converting to Docling document: {str(e)}")
+                # Return raw DocTags as fallback
+                return doctags
+        except RuntimeError as e:
+            if "CUDA out of memory" in str(e):
+                return "Error: CUDA out of memory. Try processing a smaller image or using CPU mode."
+            else:
+                raise e
     
     except Exception as e:
         error_msg = f"Error processing image: {str(e)}\n{traceback.format_exc()}"
@@ -295,8 +320,19 @@ def extract_from_file(file_content: bytes, file_type: str) -> Dict[str, float]:
         - Friction Angle (φ) in degrees
         """
         
-        # Process the image using SmolDocling
-        response_text = process_image(image, prompt)
+        try:
+            # First try with local model
+            response_text = process_image(image, prompt)
+            
+            # Check if we got an error
+            if response_text.startswith("Error:"):
+                st.warning("Local model processing failed, trying API fallback...")
+                # Try with API fallback
+                response_text = process_image_api_fallback(image, prompt)
+        except Exception as e:
+            st.warning(f"Local model processing failed: {str(e)}, trying API fallback...")
+            # Try with API fallback
+            response_text = process_image_api_fallback(image, prompt)
         
         # Extract parameters from the response
         try:
@@ -312,6 +348,9 @@ def extract_from_file(file_content: bytes, file_type: str) -> Dict[str, float]:
                 "φ": r"(?:Friction\s+Angle|φ).*?(\d+\.?\d*)\s*(?:degrees|°|deg)"
             }
             
+            # Debug output of response
+            logging.info(f"Response text excerpt: {response_text[:500]}...")
+            
             # Extract parameters
             params = {}
             for param, pattern in param_patterns.items():
@@ -320,7 +359,7 @@ def extract_from_file(file_content: bytes, file_type: str) -> Dict[str, float]:
                     params[param] = float(matches[0])
             
             # If no parameters were extracted, try looking for tables
-            if not params and "table" in response_text.lower():
+            if not params and "table" in response_text.lower() or "|" in response_text:
                 # Extract tables
                 table_pattern = r"\|(.+?)\|(.+?)\|"
                 table_matches = re.findall(table_pattern, response_text)
@@ -341,6 +380,9 @@ def extract_from_file(file_content: bytes, file_type: str) -> Dict[str, float]:
             if params:
                 return params
             else:
+                # If response text contains docling output but no parameters were matched, show a debug message
+                if "<doc" in response_text or "## " in response_text:
+                    logging.info("DocTags found but no parameters extracted. Check regex patterns.")
                 return sample_geotechnical_data()
                 
         except Exception as e:
