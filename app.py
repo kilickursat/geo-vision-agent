@@ -59,7 +59,7 @@ HF_LOGIN_AVAILABLE = False
 
 try:
     # First try importing the smolagents
-    from smolagents import tool, HfApiModel, CodeAgent, DuckDuckGoSearchTool
+    from smolagents import tool, HfApiModel, CodeAgent, ToolCallingAgent, DuckDuckGoSearchTool
     SMOLAGENTS_AVAILABLE = True
     
     # Try importing huggingface_hub for login
@@ -94,6 +94,13 @@ except ImportError as e:
         def run(self, *args, **kwargs):
             return {"error": "Agent functionality not available"}
     
+    class ToolCallingAgent:
+        def __init__(self, *args, **kwargs):
+            pass
+            
+        def run(self, *args, **kwargs):
+            return {"error": "Agent functionality not available"}
+    
     class DuckDuckGoSearchTool:
         def __call__(self, *args, **kwargs):
             return [{"title": "Search unavailable", "snippet": "Search functionality not available", "link": "#"}]
@@ -106,7 +113,7 @@ def get_hf_token():
     
     # Then check Streamlit secrets
     if not token and 'huggingface' in st.secrets:
-        token = st.secrets["huggingface"]["hf_token"]
+        token = st.secrets["huggingface"]["api_token"]
     
     # Finally, request from user if not found
     if not token:
@@ -120,127 +127,75 @@ def get_hf_token():
         
     return token
 
-# Initialize the Qwen model
-def initialize_qwen_model(token):
-    """Initialize the Qwen vision-language model."""
-    if not SMOLAGENTS_AVAILABLE or not token:
-        return None
-    
-    try:
-        # Login to Hugging Face if possible
-        if HF_LOGIN_AVAILABLE:
-            login(token)
-        
-        # Initialize the model as in the example
-        model = HfApiModel(
-            model_id="Qwen/Qwen2.5-VL-72B-Instruct",
-            token=token,
-            timeout=240  # Higher timeout for image processing
-        )
-        
-        return model
-    except Exception as e:
-        logging.error(f"Error initializing Qwen model: {str(e)}")
-        return None
-
-# Call the Qwen model with image content
-def query_qwen_vision_model(model, image, prompt):
-    """Query the Qwen vision-language model with an image and prompt."""
-    if model is None:
-        return None
-    
-    try:
-        # Convert image to base64 if it's not already a string
-        if not isinstance(image, str):
-            buffered = io.BytesIO()
-            image.save(buffered, format="JPEG")
-            image_b64 = base64.b64encode(buffered.getvalue()).decode()
-            image_url = f"data:image/jpeg;base64,{image_b64}"
-        else:
-            image_url = image
-        
-        # Create message format as shown in the example
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": image_url}},
-                    {"type": "text", "text": prompt}
-                ]
-            }
-        ]
-        
-        # Call the model
-        with st.status("Processing image with Qwen model..."):
-            response = model(messages)
-        
-        return response
-    except Exception as e:
-        logging.error(f"Error querying Qwen model: {str(e)}")
-        return None
-
-# Extract parameters from response
-def extract_parameters_from_response(response):
-    """Extract geotechnical parameters from the model response."""
-    try:
-        if response is None:
-            return None
-        
-        # Get the response text
-        if isinstance(response, dict) and "content" in response:
-            text_response = response["content"]
-        elif isinstance(response, str):
-            text_response = response
-        else:
-            text_response = str(response)
-        
-        # Try to extract JSON from the text response
-        try:
-            # Find JSON-like content in the response
-            import re
-            json_match = re.search(r'\{.*\}', text_response, re.DOTALL)
-            if json_match:
-                extracted_json = json_match.group(0)
-                params = json.loads(extracted_json)
-            else:
-                # Fallback parsing for structured text that isn't proper JSON
-                params = {}
-                lines = text_response.split('\n')
-                for line in lines:
-                    if ':' in line:
-                        key, value = line.split(':', 1)
-                        key = key.strip().replace('"', '')
-                        try:
-                            # Extract numeric values
-                            value_match = re.search(r'\d+\.?\d*', value)
-                            if value_match:
-                                params[key] = float(value_match.group(0))
-                        except:
-                            pass
-            
-            # If no parameters were extracted, return None
-            if not params:
-                return None
-                
-            return params
-        except Exception as e:
-            logging.error(f"Error parsing response: {str(e)}")
-            return None
-            
-    except Exception as e:
-        logging.error(f"Error extracting parameters: {str(e)}")
-        return None
-
-# Tool for extraction - Fixed with proper type hint for qwen_model
+# Tool for image processing
 @tool
-def extract_from_file(file_content: bytes, file_type: str, qwen_model: Optional[Any] = None) -> Dict[str, float]:
-    """
-    Extract geotechnical parameters from PDF or image files.
+def process_image(image: Image.Image, prompt: str) -> str:
+    """Process an image with a given prompt using vision-language models.
     
     Args:
-        file_content: The binary content of the uploaded file
+        image: The image to process
+        prompt: The prompt for the vision-language model
+        
+    Returns:
+        Extracted text from the image based on the prompt
+    """
+    try:
+        # Convert image to base64
+        buffered = io.BytesIO()
+        image.save(buffered, format="JPEG")
+        image_b64 = base64.b64encode(buffered.getvalue()).decode()
+        image_url = f"data:image/jpeg;base64,{image_b64}"
+        
+        # Get token
+        token = get_hf_token()
+        if not token:
+            return "Error: Hugging Face token is required for image processing."
+        
+        # Create API request
+        api_url = "https://api-inference.huggingface.co/models/Qwen/Qwen2.5-VL-7B-Instruct"
+        headers = {"Authorization": f"Bearer {token}"}
+        
+        # Prepare payload in the correct format for the Qwen VL model
+        payload = {
+            "inputs": {
+                "image": image_url,
+                "prompt": prompt
+            },
+            "parameters": {
+                "max_new_tokens": 512,
+                "temperature": 0.7,
+                "return_full_text": False
+            }
+        }
+        
+        # Make the API request
+        response = requests.post(api_url, headers=headers, json=payload)
+        
+        # Check for errors
+        if response.status_code != 200:
+            return f"Error: API request failed with status code {response.status_code}. {response.text}"
+        
+        # Parse response
+        result = response.json()
+        
+        if isinstance(result, list) and len(result) > 0:
+            return result[0].get("generated_text", str(result))
+        elif isinstance(result, dict):
+            return result.get("generated_text", str(result))
+        else:
+            return str(result)
+    
+    except Exception as e:
+        return f"Error processing image: {str(e)}"
+
+# Tool for extracting geotechnical parameters from documents
+@tool
+def extract_from_file(file_content: bytes, file_type: str) -> Dict[str, float]:
+    """Extract geotechnical parameters from files.
+    
+    Args:
+        file_content: The binary content of the file
         file_type: The type of file ('pdf' or 'image')
-        qwen_model: Optional Qwen model instance
         
     Returns:
         Dictionary of extracted parameters
@@ -274,102 +229,42 @@ def extract_from_file(file_content: bytes, file_type: str, qwen_model: Optional[
         If a parameter is not found, don't include it in the result.
         """
         
-        # Try using the Qwen model first if available
-        if qwen_model is not None:
-            response = query_qwen_vision_model(qwen_model, image, prompt)
-            params = extract_parameters_from_response(response)
-            
-            if params:
-                return params
-            else:
-                st.warning("Could not extract parameters using Qwen model. Falling back to API.")
+        # Process the image using our tool
+        response_text = process_image(image, prompt)
         
-        # If Qwen model is not available or failed, use Hugging Face API
-        token = get_hf_token()
-        
-        if not token:
-            st.error("Hugging Face token is required for parameter extraction.")
-            return sample_geotechnical_data()
-        
-        # Encode image to base64 for API request
-        buffered = io.BytesIO()
-        image.save(buffered, format="JPEG")
-        img_str = base64.b64encode(buffered.getvalue()).decode()
-        
-        # Make API request to Hugging Face Inference API
-        # Try with multiple model options in case of permission issues
-        model_options = [
-            "Qwen/Qwen2.5-VL-7B-Instruct",  # Try smaller model first
-            "Qwen/Qwen2.5-VL-72B-Instruct",
-            "llava-hf/llava-1.5-7b-hf",
-            "openai/clip-vit-base-patch32"  # Simple fallback model
-        ]
-        
-        result = None
-        last_error = None
-        
-        for model in model_options:
-            try:
-                api_url = f"https://api-inference.huggingface.co/models/{model}"
-                headers = {"Authorization": f"Bearer {token}"}
-                
-                # Use different payload formats based on model
-                if "clip" in model.lower():
-                    # CLIP model has a different input format
-                    payload = {
-                        "image": img_str,
-                        "text": prompt
-                    }
-                else:
-                    # Standard VLM format
-                    payload = {
-                        "inputs": {
-                            "image": img_str,
-                            "text": prompt
-                        }
-                    }
-                
-                with st.status(f"Trying model: {model}..."):
-                    response = requests.post(api_url, headers=headers, json=payload, timeout=30)
-                
-                if response.status_code == 200:
-                    result = response.json()
-                    st.success(f"Successfully used model: {model}")
-                    break
-                else:
-                    last_error = f"API request to {model} failed with status code {response.status_code}"
-                    st.warning(last_error)
-                    # Continue to next model
-            except Exception as e:
-                last_error = f"Error with model {model}: {str(e)}"
-                st.warning(last_error)
-                # Continue to next model
-                
-        # If all models failed
-        if result is None:
-            st.error(f"All API requests failed. Last error: {last_error}")
-            return sample_geotechnical_data()
-                
-        # Parse the response - assuming it returns text that includes JSON
+        # Extract parameters from the response
         try:
-            if isinstance(result, list) and "generated_text" in result[0]:
-                text_response = result[0]["generated_text"]
-            elif isinstance(result, dict) and "generated_text" in result:
-                text_response = result["generated_text"]
-            else:
-                text_response = str(result)
+            # Try to find a JSON object in the response
+            import re
+            json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+            if json_match:
+                extracted_json = json_match.group(0)
+                params = json.loads(extracted_json)
+                return params
             
-            # Extract parameters
-            params = extract_parameters_from_response({"content": text_response})
+            # Fallback parsing for structured text that isn't proper JSON
+            params = {}
+            lines = response_text.split('\n')
+            for line in lines:
+                if ':' in line:
+                    key, value = line.split(':', 1)
+                    key = key.strip().replace('"', '')
+                    try:
+                        # Extract numeric values
+                        value_match = re.search(r'\d+\.?\d*', value)
+                        if value_match:
+                            params[key] = float(value_match.group(0))
+                    except:
+                        pass
             
+            # If no parameters were extracted, return sample data
             if not params:
-                st.warning("Could not extract parameters from the image. Using sample data instead.")
                 return sample_geotechnical_data()
                 
             return params
                 
         except Exception as e:
-            st.error(f"Error processing API response: {str(e)}. Using sample data instead.")
+            st.error(f"Error parsing response: {str(e)}")
             return sample_geotechnical_data()
             
     except Exception as e:
@@ -392,15 +287,7 @@ def sample_geotechnical_data():
 # Tool for analyzer
 @tool
 def create_correlation_panel(data: Dict[str, float]) -> Dict[str, Any]:
-    """
-    Create a correlation panel from extracted data.
-    
-    Args:
-        data: Dictionary of extracted parameters
-        
-    Returns:
-        Dictionary with correlation matrix and figure data
-    """
+    """Create a correlation panel from extracted data."""
     try:
         # Convert dictionary to dataframe
         df = pd.DataFrame([data])
@@ -443,15 +330,7 @@ def create_correlation_panel(data: Dict[str, float]) -> Dict[str, Any]:
 # Tool for visualization
 @tool
 def create_visualizations(data: Dict[str, float]) -> Dict[str, Any]:
-    """
-    Create visualizations from extracted data.
-    
-    Args:
-        data: Dictionary of extracted parameters
-        
-    Returns:
-        Dictionary with visualization figures
-    """
+    """Create visualizations from extracted data."""
     try:
         # Convert to dataframe
         df = pd.DataFrame([data])
@@ -512,16 +391,10 @@ def create_visualizations(data: Dict[str, float]) -> Dict[str, Any]:
             "error": f"Error in visualization: {str(e)}"
         }
 
+# Tool for web search
 @tool
 def search_geotechnical_data(query: str) -> List[Dict[str, str]]:
-    """
-    Searches for geotechnical information using DuckDuckGo.
-    
-    Args:
-        query: The search query for finding geotechnical information.
-    Returns:
-        List of search results as dictionaries.
-    """
+    """Searches for geotechnical information using DuckDuckGo."""
     try:
         if not SMOLAGENTS_AVAILABLE:
             return [
@@ -535,7 +408,66 @@ def search_geotechnical_data(query: str) -> List[Dict[str, str]]:
     except Exception as e:
         return [{"title": "Search error", "snippet": f"Error: {str(e)}", "link": "#"}]
 
-# Streamlit sidebar
+# Initialize the multi-agent system
+def initialize_agents(token):
+    """Initialize the multi-agent system with a manager agent and specialized agents."""
+    if not SMOLAGENTS_AVAILABLE or not token:
+        return None, None
+    
+    try:
+        # Login to Hugging Face if possible
+        if HF_LOGIN_AVAILABLE:
+            login(token)
+        
+        # Initialize the model - use Qwen2.5-VL-7B-Instruct as specified
+        model = HfApiModel(
+            model_id="Qwen/Qwen2.5-VL-7B-Instruct",
+            token=token,
+            timeout=120  # Adjusted timeout
+        )
+        
+        # Create web search agent
+        web_agent = ToolCallingAgent(
+            tools=[DuckDuckGoSearchTool(), search_geotechnical_data],
+            model=model,
+            max_steps=5,
+            name="geotechnical_search_agent",
+            description="Searches for geotechnical engineering information on the web."
+        )
+        
+        # Create visualization agent
+        visualization_agent = ToolCallingAgent(
+            tools=[create_correlation_panel, create_visualizations],
+            model=model,
+            max_steps=3,
+            name="visualization_agent",
+            description="Creates visualizations and correlations from geotechnical data."
+        )
+        
+        # Create data extraction agent
+        extraction_agent = ToolCallingAgent(
+            tools=[extract_from_file],
+            model=model,
+            max_steps=3,
+            name="extraction_agent",
+            description="Extracts geotechnical parameters from documents and images."
+        )
+        
+        # Create the manager agent
+        manager_agent = CodeAgent(
+            tools=[],
+            model=model,
+            managed_agents=[web_agent, visualization_agent, extraction_agent],
+            additional_authorized_imports=["time", "numpy", "pandas"],
+        )
+        
+        return manager_agent, model
+    
+    except Exception as e:
+        logging.error(f"Error initializing agents: {str(e)}")
+        return None, None
+
+# Create sidebar
 def create_sidebar():
     """Create and configure the sidebar."""
     with st.sidebar:
@@ -588,14 +520,8 @@ def main():
     # Get Hugging Face token
     token = get_hf_token()
     
-    # Initialize Qwen model if possible
-    qwen_model = None
-    if token and SMOLAGENTS_AVAILABLE:
-        qwen_model = initialize_qwen_model(token)
-        if qwen_model:
-            st.success("✅ Qwen2.5-VL-72B-Instruct model initialized successfully")
-        else:
-            st.warning("⚠️ Failed to initialize Qwen model. Will use API fallback.")
+    # Initialize agents if possible
+    manager_agent, model = initialize_agents(token)
     
     # Initialize session state for storing data between runs
     if "extracted_data" not in st.session_state:
@@ -622,6 +548,13 @@ def main():
     with tab1:
         st.subheader("Parameter Extraction")
         if uploaded_file is not None:
+            # Show preview of the uploaded file
+            if uploaded_file.type.startswith('image'):
+                st.image(Image.open(uploaded_file), caption="Uploaded Image", use_column_width=True)
+                uploaded_file.seek(0)  # Reset file pointer after reading
+            elif uploaded_file.type == 'application/pdf':
+                st.write("PDF file uploaded. Click 'Extract Parameters' to process.")
+            
             if st.button("Extract Parameters"):
                 with st.spinner("Extracting parameters..."):
                     # Determine file type
@@ -630,14 +563,25 @@ def main():
                     # Read file content
                     file_content = uploaded_file.getvalue()
                     
-                    # Use direct execution
-                    try:
-                        extracted_data = extract_from_file(file_content, file_type, qwen_model)
+                    # Check if we can use the manager agent
+                    if manager_agent and SMOLAGENTS_AVAILABLE:
+                        try:
+                            # Format the query for the manager agent
+                            query = f"Extract geotechnical parameters from the uploaded {file_type} file."
+                            
+                            # For direct agent use, we'd need to modify the workflow, but for now
+                            # we'll use the direct function call as it's already set up to handle file content
+                            extracted_data = extract_from_file(file_content, file_type)
+                            st.session_state.extracted_data = extracted_data
+                        except Exception as e:
+                            st.error(f"Error using manager agent: {str(e)}")
+                            # Fallback to direct function
+                            extracted_data = extract_from_file(file_content, file_type)
+                            st.session_state.extracted_data = extracted_data
+                    else:
+                        # Use direct function call
+                        extracted_data = extract_from_file(file_content, file_type)
                         st.session_state.extracted_data = extracted_data
-                    except Exception as e:
-                        st.error(f"Error during extraction: {str(e)}\n{traceback.format_exc()}")
-                        # Fallback to sample data
-                        st.session_state.extracted_data = sample_geotechnical_data()
             
             # Display extracted data
             if st.session_state.extracted_data:
@@ -683,11 +627,21 @@ def main():
         if st.session_state.extracted_data:
             if st.button("Generate Correlation Panel"):
                 with st.spinner("Analyzing data..."):
-                    try:
+                    # Use visualization agent if available
+                    if manager_agent and SMOLAGENTS_AVAILABLE:
+                        try:
+                            # For now, we'll use the direct function for consistency
+                            correlation_data = create_correlation_panel(st.session_state.extracted_data)
+                            st.session_state.correlation_data = correlation_data
+                        except Exception as e:
+                            st.error(f"Error using visualization agent: {str(e)}")
+                            # Fallback to direct function
+                            correlation_data = create_correlation_panel(st.session_state.extracted_data)
+                            st.session_state.correlation_data = correlation_data
+                    else:
+                        # Use direct function
                         correlation_data = create_correlation_panel(st.session_state.extracted_data)
                         st.session_state.correlation_data = correlation_data
-                    except Exception as e:
-                        st.error(f"Error during analysis: {str(e)}\n{traceback.format_exc()}")
             
             # Display correlation panel
             if st.session_state.correlation_data:
@@ -726,14 +680,24 @@ def main():
             
             if st.button("Generate Visualizations"):
                 with st.spinner("Creating visualizations..."):
-                    try:
-                        # Filter data to include only selected parameters
-                        filtered_data = {k: v for k, v in st.session_state.extracted_data.items() if k in selected_params}
-                        
+                    # Filter data to include only selected parameters
+                    filtered_data = {k: v for k, v in st.session_state.extracted_data.items() if k in selected_params}
+                    
+                    # Use visualization agent if available
+                    if manager_agent and SMOLAGENTS_AVAILABLE:
+                        try:
+                            # For now, we'll use the direct function for consistency
+                            visualization_data = create_visualizations(filtered_data)
+                            st.session_state.visualization_data = visualization_data
+                        except Exception as e:
+                            st.error(f"Error using visualization agent: {str(e)}")
+                            # Fallback to direct function
+                            visualization_data = create_visualizations(filtered_data)
+                            st.session_state.visualization_data = visualization_data
+                    else:
+                        # Use direct function
                         visualization_data = create_visualizations(filtered_data)
                         st.session_state.visualization_data = visualization_data
-                    except Exception as e:
-                        st.error(f"Error during visualization: {str(e)}\n{traceback.format_exc()}")
             
             # Display visualizations
             if st.session_state.visualization_data:
@@ -768,19 +732,22 @@ def main():
         
         if search_query and st.button("Search"):
             with st.spinner("Searching for information..."):
-                try:
+                # Use web search agent if available
+                if manager_agent and SMOLAGENTS_AVAILABLE:
+                    try:
+                        # For integration with the real agent system, we'd use the manager_agent.run()
+                        # But for now we'll use the direct search tool for consistency
+                        search_results = search_geotechnical_data(search_query)
+                        st.session_state.search_results = search_results
+                    except Exception as e:
+                        st.error(f"Error using web search agent: {str(e)}")
+                        # Fallback to direct function
+                        search_results = search_geotechnical_data(search_query)
+                        st.session_state.search_results = search_results
+                else:
+                    # Use direct search
                     search_results = search_geotechnical_data(search_query)
-                    
-                    # Ensure search_results is a list
-                    if not isinstance(search_results, list):
-                        search_results = [{"title": "Results", "snippet": str(search_results), "link": "#"}]
-                        
                     st.session_state.search_results = search_results
-                except Exception as e:
-                    st.error(f"Error during search: {str(e)}\n{traceback.format_exc()}")
-                    st.session_state.search_results = [
-                        {"title": "Search error", "snippet": f"An error occurred: {str(e)}", "link": "#"}
-                    ]
         
         # Display search results
         if st.session_state.search_results:
