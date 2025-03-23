@@ -438,17 +438,43 @@ def search_geotechnical_data(query: str) -> List[Dict[str, str]]:
                 {"title": "Search unavailable", "snippet": "Search functionality is not available.", "link": "#"},
                 {"title": "Missing components", "snippet": "The required SmolaAgent components are not installed.", "link": "#"}
             ]
-            
-        search_tool = DuckDuckGoSearchTool()
-        results = search_tool(query)
         
-        # Limit the number of results to avoid overwhelming the user
-        max_results = 5
-        if isinstance(results, list) and len(results) > max_results:
-            results = results[:max_results]
+        # Instead of using DuckDuckGoSearchTool, create a direct fallback search function
+        try:  
+            # First attempt with reduced timeout
+            search_tool = DuckDuckGoSearchTool()
+            results = search_tool(query)
             
-        return results
+            # Limit the number of results
+            max_results = 5
+            if isinstance(results, list) and len(results) > max_results:
+                results = results[:max_results]
+                
+            return results
+        except Exception as search_error:
+            logging.warning(f"DuckDuckGo search failed: {str(search_error)}")
+            
+            # Fallback: Return some static results for geotechnical queries
+            return [
+                {
+                    "title": "Search Engine Timeout - Using Local Results",
+                    "snippet": "The search engine request timed out. Here are some common geotechnical resources instead.",
+                    "link": "#"
+                },
+                {
+                    "title": "Geotechnical Parameter Correlations - Handbook",
+                    "snippet": "Common correlations between UCS, RMR, GSI and other geotechnical parameters for rock mechanics applications.",
+                    "link": "https://www.geotechpedia.com"
+                },
+                {
+                    "title": "Rock Mass Rating (RMR) System",
+                    "snippet": "Overview of the Rock Mass Rating system developed by Bieniawski for classification of rock masses.",
+                    "link": "https://www.rocscience.com"
+                }
+            ]
+            
     except Exception as e:
+        logging.error(f"Error in search_geotechnical_data: {str(e)}\n{traceback.format_exc()}")
         return [{"title": "Search error", "snippet": f"Error: {str(e)}", "link": "#"}]
 
 # Initialize the multi-agent system
