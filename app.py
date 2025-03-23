@@ -15,14 +15,14 @@ class TorchClassesModule(types.ModuleType):
             return Path()
         raise AttributeError(f"module 'torch.classes' has no attribute '{attr}'")
 
-# Apply the patch before any imports
+# Apply the patch before any torch imports
 sys.modules["torch.classes"] = TorchClassesModule()
 
 # Completely disable Streamlit's file watcher
 os.environ["STREAMLIT_WATCH_MODULES"] = "false"
 os.environ["STREAMLIT_SERVER_WATCH_DIRS"] = "false"
 
-# Standard imports that don't cause conflicts
+# Standard imports
 import streamlit as st
 import io
 import base64
@@ -38,6 +38,7 @@ from typing import List, Dict, Any, Union, Optional
 import traceback
 import logging
 import re
+from pathlib import Path
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -77,6 +78,24 @@ except ImportError:
             st.error(f"Error converting PDF to image: {str(e)}")
             # Return a blank image as last resort
             return [Image.new('RGB', (612, 792), 'white')]
+
+# Import SmolDocling dependencies
+SMOLDOCLING_AVAILABLE = False
+try:
+    import torch
+    from transformers import AutoProcessor, AutoModelForVision2Seq
+    from transformers.image_utils import load_image
+    
+    # Check if docling_core is available
+    try:
+        from docling_core.types.doc import DoclingDocument
+        from docling_core.types.doc.document import DocTagsDocument
+        SMOLDOCLING_AVAILABLE = True
+        logging.info("Successfully imported SmolDocling dependencies")
+    except ImportError:
+        logging.error("docling_core not found - SmolDocling functionality limited")
+except ImportError as e:
+    logging.error(f"Error importing SmolDocling dependencies: {str(e)}")
 
 # Import smolagents components with careful fallbacks
 SMOLAGENTS_AVAILABLE = False
@@ -155,87 +174,98 @@ def get_hf_token():
         
     return token
 
-# SmolDocling API implementation 
-@tool
-def process_image_api(image: Image.Image, prompt: str) -> str:
-    """Use SmolDocling API to process an image with a given prompt.
-    
-    Args:
-        image: The image to process
-        prompt: The prompt for SmolDocling
-        
-    Returns:
-        Extracted text from the image based on the prompt
-    """
+# Initialize SmolDocling model and processor
+@st.cache_resource
+def load_smoldocling_model():
+    """Load SmolDocling model and processor."""
     try:
-        # Convert image to base64
-        buffered = io.BytesIO()
-        # Resize image if it's too large (to avoid timeouts)
-        max_size = (1200, 1200)
-        if image.width > max_size[0] or image.height > max_size[1]:
-            image = image.copy()  # Create a copy to avoid modifying original
-            image.thumbnail(max_size, Image.LANCZOS)
+        if not SMOLDOCLING_AVAILABLE:
+            return None, None
             
-        image.save(buffered, format="JPEG", quality=95)
-        img_bytes = buffered.getvalue()
-        image_b64 = base64.b64encode(img_bytes).decode()
+        # Initialize processor
+        processor = AutoProcessor.from_pretrained("ds4sd/SmolDocling-256M-preview")
         
-        # Get token
-        token = get_hf_token()
-        if not token:
-            return "Error: Hugging Face token is required for image processing."
+        # Check if CUDA is available
+        device = "cuda" if torch.cuda.is_available() else "cpu"
         
-        # Create API request
-        api_url = "https://api-inference.huggingface.co/models/ds4sd/SmolDocling-256M-preview"
-        headers = {"Authorization": f"Bearer {token}"}
+        # Initialize model
+        model = AutoModelForVision2Seq.from_pretrained(
+            "ds4sd/SmolDocling-256M-preview",
+            torch_dtype=torch.float32,  # Use float32 for better compatibility
+            _attn_implementation="eager",  # Use eager for better compatibility
+        ).to(device)
         
-        # Format the messages in the format SmolDocling expects
+        logging.info(f"SmolDocling model loaded successfully on {device}")
+        return processor, model
+    except Exception as e:
+        logging.error(f"Error loading SmolDocling model: {str(e)}")
+        return None, None
+
+# Process image with SmolDocling
+def process_with_smoldocling(image: Image.Image, prompt_text: str = "Convert this page to docling."):
+    """Process an image with SmolDocling model."""
+    try:
+        # Check if SmolDocling is available
+        if not SMOLDOCLING_AVAILABLE:
+            return "Error: SmolDocling dependencies are not available."
+            
+        # Load the model and processor
+        processor, model = load_smoldocling_model()
+        if processor is None or model is None:
+            return "Error: Failed to load SmolDocling model or processor."
+        
+        # Determine device
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        
+        # Create input messages
         messages = [
             {
-                "role": "user", 
+                "role": "user",
                 "content": [
                     {"type": "image"},
-                    {"type": "text", "text": prompt}
+                    {"type": "text", "text": prompt_text}
                 ]
-            }
+            },
         ]
         
-        # Format payload with image and prompt using the expected format
-        payload = {
-            "inputs": f"![](data:image/jpeg;base64,{image_b64}) {prompt}",
-            "parameters": {
-                "max_new_tokens": 4096,
-                "do_sample": False
-            }
-        }
+        # Prepare inputs
+        prompt = processor.apply_chat_template(messages, add_generation_prompt=True)
+        inputs = processor(text=prompt, images=[image], return_tensors="pt", truncation=True)
+        inputs = inputs.to(device)
         
-        # Make the API request with increased timeout
-        response = requests.post(api_url, headers=headers, json=payload, timeout=120)
+        # Generate outputs
+        with torch.no_grad():
+            generated_ids = model.generate(
+                **inputs, 
+                max_new_tokens=4096,  # Reduced from 8192 for stability
+                do_sample=False,
+                num_beams=1
+            )
         
-        # Log the response for debugging
-        logging.info(f"API Response Status: {response.status_code}")
+        # Process results
+        prompt_length = inputs.input_ids.shape[1]
+        trimmed_generated_ids = generated_ids[:, prompt_length:]
+        doctags = processor.batch_decode(
+            trimmed_generated_ids,
+            skip_special_tokens=False,
+        )[0].lstrip()
         
-        # Check for errors
-        if response.status_code != 200:
-            error_text = f"Error: API request failed with status code {response.status_code}. Response: {response.text}"
-            logging.error(error_text)
-            return error_text
-        
-        # Return the response text
-        result = response.json()
-        
-        if isinstance(result, list) and len(result) > 0:
-            if isinstance(result[0], dict) and "generated_text" in result[0]:
-                return result[0]["generated_text"]
-            else:
-                return str(result)
-        elif isinstance(result, dict) and "generated_text" in result:
-            return result["generated_text"]
-        else:
-            return str(result)
-        
+        # Populate document
+        try:
+            doctags_doc = DocTagsDocument.from_doctags_and_image_pairs([doctags], [image])
+            doc = DoclingDocument(name="Document")
+            doc.load_from_doctags(doctags_doc)
+            
+            # Export as markdown
+            markdown_content = doc.export_to_markdown()
+            return markdown_content
+        except Exception as e:
+            logging.error(f"Error converting DocTags to document: {str(e)}")
+            # Return raw doctags as fallback
+            return doctags
+            
     except Exception as e:
-        error_msg = f"Error using API: {str(e)}\n{traceback.format_exc()}"
+        error_msg = f"Error in SmolDocling processing: {str(e)}\n{traceback.format_exc()}"
         logging.error(error_msg)
         return error_msg
 
@@ -277,8 +307,8 @@ def extract_from_file(file_content: bytes, file_type: str) -> Dict[str, float]:
         - Friction Angle (φ) in degrees
         """
         
-        # Process the image using SmolDocling API
-        response_text = process_image_api(image, prompt)
+        # Process the image using SmolDocling
+        response_text = process_with_smoldocling(image, prompt)
         
         # Extract parameters from the response
         try:
@@ -579,8 +609,10 @@ def create_sidebar():
             
             # Display system information
             st.write(f"smolagents available: {SMOLAGENTS_AVAILABLE}")
+            st.write(f"SmolDocling available: {SMOLDOCLING_AVAILABLE}")
             st.write(f"PDF to Image available: {PDF_TO_IMAGE_AVAILABLE}")
             st.write(f"HF Login available: {HF_LOGIN_AVAILABLE}")
+            st.write(f"Device: {'CUDA' if torch.cuda.is_available() else 'CPU'}" if 'torch' in globals() else "Device: Unknown")
         
         # Information
         st.subheader("Information")
@@ -592,7 +624,10 @@ def create_sidebar():
         
         # Show mode
         st.subheader("Mode")
-        st.info("💡 Using SmolDocling API for document processing")
+        if SMOLDOCLING_AVAILABLE:
+            st.success("✅ Using local SmolDocling model")
+        else:
+            st.warning("⚠️ SmolDocling not available (missing dependencies)")
             
         if SMOLAGENTS_AVAILABLE:
             st.success("✅ SmolaAgent integration available")
