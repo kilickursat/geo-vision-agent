@@ -119,11 +119,6 @@ def get_hf_token():
         elif "api_token" in st.secrets["huggingface"]:
             token = st.secrets["huggingface"]["api_token"]
     
-    # If still not found, check if token is directly provided
-    if not token:
-        # Hardcoded token for testing (you should remove this in production)
-        token = "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"
-    
     # Finally, request from user if not found
     if not token:
         if "hf_token" not in st.session_state:
@@ -583,7 +578,7 @@ def main():
         if uploaded_file is not None:
             # Show preview of the uploaded file
             if uploaded_file.type.startswith('image'):
-                st.image(Image.open(uploaded_file), caption="Uploaded Image", use_column_width=True)
+                st.image(Image.open(uploaded_file), caption="Uploaded Image", use_container_width=True)
                 uploaded_file.seek(0)  # Reset file pointer after reading
             elif uploaded_file.type == 'application/pdf':
                 st.write("PDF file uploaded. Click 'Extract Parameters' to process.")
