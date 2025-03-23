@@ -156,27 +156,18 @@ def process_image(image: Image.Image, prompt: str) -> str:
         if not token:
             return "Error: Hugging Face token is required for image processing."
         
-        # Create API request - using the correct format for Qwen VL models
+        # Create API request - using simplified format as suggested
         api_url = "https://api-inference.huggingface.co/models/Qwen/Qwen2.5-VL-7B-Instruct"
-        headers = {"Authorization": f"Bearer {token}"}
         
-        # Use the raw message format that Qwen expects
+        # Add Content-Type header
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
+        }
+        
+        # Use the simplified HTML-embedded format
         payload = {
-            "inputs": {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{image_b64}"
-                        }
-                    },
-                    {
-                        "type": "text",
-                        "text": prompt
-                    }
-                ]
-            },
+            "inputs": f"<img src=\"data:image/jpeg;base64,{image_b64}\"> {prompt}",
             "parameters": {
                 "return_full_text": False,
                 "max_new_tokens": 512
@@ -188,7 +179,6 @@ def process_image(image: Image.Image, prompt: str) -> str:
         
         # Log the response for debugging
         logging.info(f"API Response Status: {response.status_code}")
-        logging.info(f"API Response Headers: {response.headers}")
         
         # Check for errors
         if response.status_code != 200:
