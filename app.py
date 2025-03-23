@@ -148,50 +148,75 @@ def process_image(image: Image.Image, prompt: str) -> str:
         # Convert image to base64
         buffered = io.BytesIO()
         image.save(buffered, format="JPEG")
-        image_b64 = base64.b64encode(buffered.getvalue()).decode()
-        image_url = f"data:image/jpeg;base64,{image_b64}"
+        img_bytes = buffered.getvalue()
+        image_b64 = base64.b64encode(img_bytes).decode()
         
         # Get token
         token = get_hf_token()
         if not token:
             return "Error: Hugging Face token is required for image processing."
         
-        # Create API request
+        # Create API request - using the correct format for Qwen VL models
         api_url = "https://api-inference.huggingface.co/models/Qwen/Qwen2.5-VL-7B-Instruct"
         headers = {"Authorization": f"Bearer {token}"}
         
-        # Prepare payload in the correct format for the Qwen VL model
+        # Use the raw message format that Qwen expects
         payload = {
             "inputs": {
-                "image": image_url,
-                "prompt": prompt
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{image_b64}"
+                        }
+                    },
+                    {
+                        "type": "text",
+                        "text": prompt
+                    }
+                ]
             },
             "parameters": {
-                "max_new_tokens": 512,
-                "temperature": 0.7,
-                "return_full_text": False
+                "return_full_text": False,
+                "max_new_tokens": 512
             }
         }
         
-        # Make the API request
-        response = requests.post(api_url, headers=headers, json=payload)
+        # Make the API request with increased timeout
+        response = requests.post(api_url, headers=headers, json=payload, timeout=60)
+        
+        # Log the response for debugging
+        logging.info(f"API Response Status: {response.status_code}")
+        logging.info(f"API Response Headers: {response.headers}")
         
         # Check for errors
         if response.status_code != 200:
-            return f"Error: API request failed with status code {response.status_code}. {response.text}"
+            error_text = f"Error: API request failed with status code {response.status_code}. Response: {response.text}"
+            logging.error(error_text)
+            return error_text
         
         # Parse response
         result = response.json()
+        logging.info(f"API Response Body: {result}")
         
         if isinstance(result, list) and len(result) > 0:
-            return result[0].get("generated_text", str(result))
+            if "generated_text" in result[0]:
+                return result[0]["generated_text"]
+            else:
+                return str(result)
         elif isinstance(result, dict):
-            return result.get("generated_text", str(result))
+            if "generated_text" in result:
+                return result["generated_text"]
+            else:
+                return str(result)
         else:
             return str(result)
     
     except Exception as e:
-        return f"Error processing image: {str(e)}"
+        error_msg = f"Error processing image: {str(e)}\n{traceback.format_exc()}"
+        logging.error(error_msg)
+        return error_msg
 
 # Tool for extracting geotechnical parameters from documents
 @tool
@@ -432,6 +457,12 @@ def search_geotechnical_data(query: str) -> List[Dict[str, str]]:
             
         search_tool = DuckDuckGoSearchTool()
         results = search_tool(query)
+        
+        # Limit the number of results to avoid overwhelming the user
+        max_results = 5
+        if isinstance(results, list) and len(results) > max_results:
+            results = results[:max_results]
+            
         return results
     except Exception as e:
         return [{"title": "Search error", "snippet": f"Error: {str(e)}", "link": "#"}]
