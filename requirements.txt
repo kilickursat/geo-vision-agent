@@ -25,4 +25,5 @@ streamlit
 torch
 transformers
 pillow
+nltk
 docling
