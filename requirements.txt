@@ -30,3 +30,17 @@ beautifulsoup
 nltk
 spacy
 docling
+streamlit>=1.22.0
+torch>=2.0.0
+Pillow>=9.5.0
+transformers>=4.30.0
+duckduckgo-search>=3.0.0
+nltk>=3.8.1
+spacy>=3.6.0
+plotly>=5.14.0
+PyPDF2>=3.0.0
+pdf2image>=1.16.3
+beautifulsoup4>=4.12.0
+markdown>=3.4.3
+pandas>=2.0.0
+numpy>=1.24.0
