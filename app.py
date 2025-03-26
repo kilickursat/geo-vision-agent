@@ -12,7 +12,7 @@ from huggingface_hub import login
 from typing import Dict, List
 from markdownify import markdownify
 from requests.exceptions import RequestException
-from smolagents import tool, CodeAgent, HfApiModel, ManagedAgent, ToolCallingAgent, DuckDuckGoSearchTool
+from smolagents import tool, CodeAgent, HfApiModel, ToolCallingAgent, DuckDuckGoSearchTool
 import traceback
 import sys
 
@@ -463,18 +463,15 @@ def initialize_agents():
     try:
         hf_key = st.secrets["HUGGINGFACE_API_KEY"]
         login(hf_key)
-        model = HfApiModel("Qwen/Qwen2.5-Coder-32B-Instruct")  # Updated to Qwen model <button class="citation-flag" data-index="4">
+        model = HfApiModel("Qwen/Qwen2.5-Coder-32B-Instruct")  # Updated to Qwen model
+        
         # Web search agent
         web_agent = ToolCallingAgent(
             tools=[search_geotechnical_data, visit_webpage],
             model=model,
             max_steps=10
         )
-        managed_web_agent = ManagedAgent(
-            agent=web_agent,
-            name="geotech_web_search",
-            description="Performs web searches for geotechnical data."
-        )
+        
         # Geotech calculation agent
         geotech_agent = ToolCallingAgent(
             tools=[
@@ -494,19 +491,15 @@ def initialize_agents():
             model=model,
             max_steps=10
         )
-        managed_geotech_agent = ManagedAgent(
-            agent=geotech_agent,
-            name="geotech_analysis",
-            description="Performs geotechnical calculations."
-        )
+        
         # Manager agent with search_geotechnical_data tool
         manager_agent = CodeAgent(
             tools=[search_geotechnical_data],
             model=model,
-            managed_agents=[managed_web_agent, managed_geotech_agent],
             additional_authorized_imports=["time", "numpy", "pandas"]
         )
-        return managed_web_agent, managed_geotech_agent, manager_agent
+        
+        return web_agent, geotech_agent, manager_agent
     except Exception as e:
         st.error(f"Failed to initialize agents: {str(e)}\nFull traceback:\n{traceback.format_exc()}")
         return None, None, None
@@ -514,7 +507,7 @@ def initialize_agents():
 def process_request(request: str):
     try:
         web_result = search_geotechnical_data(request)
-        geotech_result = managed_geotech_agent(request=request)
+        geotech_result = geotech_agent(request=request)
         final_result = list(manager_agent.run(
             request,
             {
@@ -531,7 +524,7 @@ def process_request(request: str):
         return f"Error: {str(e)}\nFull traceback:\n{traceback.format_exc()}"
 
 # Initialize agent
-managed_web_agent, managed_geotech_agent, manager_agent = initialize_agents()
+web_agent, geotech_agent, manager_agent = initialize_agents()
 
 # Sidebar
 with st.sidebar:
