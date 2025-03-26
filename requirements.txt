@@ -25,6 +25,10 @@ streamlit
 torch
 transformers
 pillow
+markdown
+beautifulsoup 
 nltk
+base64
+bytesio
 spacy
 docling
