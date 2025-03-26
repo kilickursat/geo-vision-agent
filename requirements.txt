@@ -21,3 +21,8 @@ docling_core
 # Optional: Only include if absolutely needed
 pdf2image
 python-magic
+streamlit
+torch
+transformers
+pillow
+docling
