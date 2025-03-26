@@ -28,7 +28,5 @@ pillow
 markdown
 beautifulsoup 
 nltk
-base64
-bytesio
 spacy
 docling
