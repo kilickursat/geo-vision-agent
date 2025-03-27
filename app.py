@@ -466,7 +466,8 @@ def initialize_agents():
         # Try to get the Hugging Face API key from secrets or environment variable
         hf_key = None
         try:
-            hf_key = st.secrets.get("HUGGINGFACE_API_KEY", os.environ.get("HUGGINGFACE_API_KEY"))
+            # Access nested secret properly
+            hf_key = st.secrets["huggingface"]["HUGGINGFACE_API_KEY"]
         except Exception as e:
             st.warning(f"Couldn't access secrets: {str(e)}")
             hf_key = os.environ.get("HUGGINGFACE_API_KEY")
