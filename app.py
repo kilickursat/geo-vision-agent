@@ -458,12 +458,31 @@ def predict_cutter_life(ucs: float, penetration: float, rpm: float, diameter: fl
           (diameter ** constants['C5']) * (cai ** constants['C6']))
     return {"cutter_life_m3": cl}
 
+
 @st.cache_resource
 def initialize_agents():
     try:
-        hf_key = st.secrets["HUGGINGFACE_API_KEY"]
+        # Try to get the Hugging Face API key from secrets or environment variable
+        hf_key = None
+        try:
+            hf_key = st.secrets.get("HUGGINGFACE_API_KEY", os.environ.get("HUGGINGFACE_API_KEY"))
+        except Exception as e:
+            st.warning(f"Couldn't access secrets: {str(e)}")
+            hf_key = os.environ.get("HUGGINGFACE_API_KEY")
+
+        if not hf_key:
+            st.warning("""
+                **Hugging Face API key not found.**  
+                Please add your key to either:
+                - A `secrets.toml` file (for local development)
+                - Environment variables (for deployment)
+                
+                The app will continue with limited functionality.
+            """)
+            return None, None, None
+
         login(hf_key)
-        model = HfApiModel("Qwen/Qwen2.5-Coder-32B-Instruct")  # Updated to Qwen model
+        model = HfApiModel("Qwen/Qwen2.5-Coder-32B-Instruct")
         
         # Web search agent
         web_agent = ToolCallingAgent(
