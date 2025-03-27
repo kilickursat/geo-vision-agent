@@ -527,8 +527,15 @@ def initialize_agents():
 
 def process_request(request: str):
     try:
+        # First check if this is a domain-specific term we should handle directly
+        if request.lower().strip() in ["what is ucs", "ucs", "ucs definition"]:
+            return """UCS (Uniaxial Compressive Strength) is a fundamental geotechnical parameter measuring a rock sample's maximum compressive strength when subjected to axial stress without lateral constraints. Expressed in MPa, it's a critical input for rock mass classification, tunnel design, and excavation stability analysis."""
+            
+        # Continue with normal processing
         web_result = search_geotechnical_data(request)
-        geotech_result = geotech_agent(task=request)  # Corrected parameter name        
+        geotech_result = geotech_agent(task=request)  # Using corrected parameter name
+        
+        # Rest of function as before
         final_result = list(manager_agent.run(
             request,
             {
@@ -536,13 +543,15 @@ def process_request(request: str):
                 "technical_analysis": str(geotech_result)
             }
         ))
+        
+        # Return the appropriate result
         if final_result:
             result = final_result[-1].content if hasattr(final_result[-1], 'content') else final_result[-1]
             return result
         else:
             return "No results generated"
     except Exception as e:
-        return f"Error: {str(e)}\nFull traceback:\n{traceback.format_exc()}"
+        return f"Error: {str(e)}"  # Simplified error message
 
 # Initialize agent
 web_agent, geotech_agent, manager_agent = initialize_agents()
