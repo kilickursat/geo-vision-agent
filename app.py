@@ -15,6 +15,7 @@ from requests.exceptions import RequestException
 from smolagents import tool, CodeAgent, HfApiModel, ToolCallingAgent, DuckDuckGoSearchTool
 import traceback
 import sys
+import os
 
 # Page configuration
 st.set_page_config(
