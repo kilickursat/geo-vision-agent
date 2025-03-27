@@ -528,7 +528,7 @@ def initialize_agents():
 def process_request(request: str):
     try:
         web_result = search_geotechnical_data(request)
-        geotech_result = geotech_agent(request=request)
+        geotech_result = geotech_agent(task=request)        
         final_result = list(manager_agent.run(
             request,
             {
