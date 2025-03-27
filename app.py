@@ -460,7 +460,7 @@ def predict_cutter_life(ucs: float, penetration: float, rpm: float, diameter: fl
     return {"cutter_life_m3": cl}
 
 
-@st.cache_resource
+#@st.cache_resource
 def initialize_agents():
     try:
         # Try to get the Hugging Face API key from secrets or environment variable
