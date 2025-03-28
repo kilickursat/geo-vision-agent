@@ -10,6 +10,10 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir --ignore-installed blinker -r requirements.txt
 
+# Clear cache before downloading the model
+RUN rm -rf /root/.cache/huggingface/hub/* && \
+    mkdir -p /root/.cache/huggingface/hub/
+
 # Copy the handler code
 COPY handler.py .
 
