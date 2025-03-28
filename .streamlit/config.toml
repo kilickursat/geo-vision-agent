@@ -2,7 +2,7 @@
 fileWatcherType = "none"
 headless = true
 enableCORS = false
-port = $PORT
+port = 8501  # <--- Use a valid integer here
 
 [browser]
 gatherUsageStats = false
