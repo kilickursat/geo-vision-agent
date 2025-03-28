@@ -7,7 +7,7 @@ numpy
 plotly
 requests
 markdownify
-
+runpod
 # Hugging Face and AI agents
 huggingface_hub
 smolagents
