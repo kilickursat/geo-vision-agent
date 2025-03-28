@@ -9,13 +9,27 @@ import re
 import requests
 from datetime import datetime
 from huggingface_hub import login
-from typing import Dict, List
+from typing import Dict, List, Any, Tuple
 from markdownify import markdownify
 from requests.exceptions import RequestException
 from smolagents import tool, CodeAgent, HfApiModel, ToolCallingAgent, DuckDuckGoSearchTool
 import traceback
 import sys
-import os  # Add this line
+import os
+import io
+import tempfile
+from PIL import Image
+import PyPDF2
+import pdf2image
+import base64
+import torch
+
+# Try to import ColPali
+try:
+    from colpali_engine.models import ColPali, ColPaliProcessor
+    COLPALI_AVAILABLE = True
+except ImportError:
+    COLPALI_AVAILABLE = False
 
 # Page configuration
 st.set_page_config(
@@ -36,6 +50,193 @@ if 'current_analysis' not in st.session_state:
     st.session_state.current_analysis = None
 if 'analysis_params' not in st.session_state:
     st.session_state.analysis_params = {}
+if 'pdf_analysis' not in st.session_state:
+    st.session_state.pdf_analysis = None
+if 'uploaded_pdf' not in st.session_state:
+    st.session_state.uploaded_pdf = None
+
+# Initialize ColPali model and processor globals
+colpali_model = None
+colpali_processor = None
+
+def initialize_colpali(device="cuda:0"):
+    """Initialize ColPali model and processor."""
+    global colpali_model, colpali_processor
+    
+    if not COLPALI_AVAILABLE:
+        return None, None
+    
+    if colpali_model is None:
+        try:
+            model_name = "vidore/colpali-v1.3"
+            
+            # Use CPU if GPU not available
+            if not torch.cuda.is_available() and device.startswith("cuda"):
+                device = "cpu"
+                
+            # Check for Apple Silicon
+            if device == "cpu" and torch.backends.mps.is_available():
+                device = "mps"
+                
+            colpali_model = ColPali.from_pretrained(
+                model_name,
+                torch_dtype=torch.bfloat16,
+                device_map=device,
+            ).eval()
+            
+            colpali_processor = ColPaliProcessor.from_pretrained(model_name)
+        except Exception as e:
+            st.error(f"Error initializing ColPali: {str(e)}")
+            return None, None
+    
+    return colpali_model, colpali_processor
+
+def pdf_to_images_and_text(pdf_bytes):
+    """Convert PDF bytes to a list of PIL images and extract text."""
+    images = []
+    texts = []
+    
+    # Read PDF with PyPDF2
+    with io.BytesIO(pdf_bytes) as data:
+        reader = PyPDF2.PdfReader(data)
+        num_pages = len(reader.pages)
+        
+        # Extract text from each page
+        for page_num in range(num_pages):
+            page = reader.pages[page_num]
+            texts.append(page.extract_text())
+        
+        # Convert PDF to images using pdf2image
+        with tempfile.NamedTemporaryFile(suffix=".pdf") as temp_pdf:
+            temp_pdf.write(pdf_bytes)
+            temp_pdf.flush()
+            
+            # Adjust DPI as needed for quality vs performance
+            pdf_images = pdf2image.convert_from_path(
+                temp_pdf.name, 
+                dpi=150,
+                fmt="jpeg"
+            )
+            
+            images.extend(pdf_images)
+    
+    return images, texts
+
+@tool
+def extract_pdf_features(pdf_bytes: bytes, query: str = None) -> Dict[str, Any]:
+    """Extract visual and textual features from PDF using ColPali VLM model.
+    
+    Args:
+        pdf_bytes: The binary content of the PDF file
+        query: Optional query to compare PDF content against
+        
+    Returns:
+        Dictionary containing extracted features, page content, and similarity scores
+    """
+    try:
+        # Initialize the model if not already done
+        model, processor = initialize_colpali()
+        
+        if model is None or processor is None:
+            return {"error": "ColPali model initialization failed"}
+        
+        # Step 1: Convert PDF to images and extract text
+        pdf_images, pdf_text = pdf_to_images_and_text(pdf_bytes)
+        
+        # Step 2: Process the images through ColPali
+        batch_images = processor.process_images(pdf_images).to(model.device)
+        
+        # Step 3: Get image embeddings
+        with torch.no_grad():
+            image_embeddings = model(**batch_images)
+            
+        # Step 4: If query provided, calculate similarity scores
+        query_scores = {}
+        if query:
+            batch_query = processor.process_queries([query]).to(model.device)
+            with torch.no_grad():
+                query_embedding = model(**batch_query)
+            
+            # Calculate similarity scores
+            scores = processor.score_multi_vector(query_embedding, image_embeddings)
+            query_scores = {
+                "query": query,
+                "page_scores": [float(score) for score in scores[0]]
+            }
+        
+        # Step 5: Prepare results
+        result = {
+            "num_pages": len(pdf_images),
+            "page_text": pdf_text,
+            "embedding_dimensions": image_embeddings.embeddings.shape[1],
+            "tokens_per_page": image_embeddings.embeddings.shape[2],
+            "query_scores": query_scores
+        }
+        
+        return result
+    
+    except Exception as e:
+        return {"error": str(e)}
+
+@tool
+def find_relevant_pdf_sections(pdf_bytes: bytes, query: str) -> Dict[str, Any]:
+    """Find and extract sections from a PDF that are most relevant to a query.
+    
+    Args:
+        pdf_bytes: The binary content of the PDF file
+        query: The search query
+        
+    Returns:
+        Dictionary containing relevant sections, similarity scores, and snippets
+    """
+    try:
+        # First extract features using ColPali
+        features = extract_pdf_features(pdf_bytes, query)
+        
+        if "error" in features:
+            return features
+        
+        # Get the pages with highest similarity scores
+        page_scores = features["query_scores"]["page_scores"]
+        page_text = features["page_text"]
+        
+        # Sort pages by score
+        scored_pages = sorted(
+            [(i, page_scores[i], page_text[i]) for i in range(len(page_scores))],
+            key=lambda x: x[1],
+            reverse=True
+        )
+        
+        # Extract top 3 most relevant pages or fewer if not available
+        top_pages = scored_pages[:min(3, len(scored_pages))]
+        
+        # Extract relevant snippets from each page
+        results = []
+        for page_idx, score, text in top_pages:
+            # Split text into paragraphs
+            paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
+            
+            # Process query and paragraphs for better snippet extraction
+            filtered_paragraphs = []
+            for para in paragraphs:
+                if len(para) > 30:  # Avoid tiny fragments
+                    filtered_paragraphs.append(para)
+            
+            results.append({
+                "page_number": page_idx + 1,
+                "similarity_score": round(float(score), 4),
+                "content": text,
+                "snippets": filtered_paragraphs[:3]  # Take up to 3 paragraphs
+            })
+        
+        return {
+            "query": query,
+            "relevant_sections": results,
+            "total_pages": features["num_pages"]
+        }
+    
+    except Exception as e:
+        return {"error": str(e)}
 
 @tool
 def visit_webpage(url: str) -> str:
@@ -459,8 +660,6 @@ def predict_cutter_life(ucs: float, penetration: float, rpm: float, diameter: fl
           (diameter ** constants['C5']) * (cai ** constants['C6']))
     return {"cutter_life_m3": cl}
 
-
-#@st.cache_resource
 def initialize_agents():
     try:
         # Try to get the Hugging Face API key from secrets or environment variable
@@ -486,6 +685,17 @@ def initialize_agents():
         login(hf_key)
         model = HfApiModel("Qwen/Qwen2.5-Coder-32B-Instruct")
         
+        # Initialize ColPali model if available
+        if COLPALI_AVAILABLE:
+            try:
+                colpali_model, colpali_processor = initialize_colpali()
+                if colpali_model:
+                    st.success("ColPali VLM model initialized successfully.")
+            except Exception as e:
+                st.warning(f"Could not initialize ColPali model: {str(e)}")
+        else:
+            st.warning("ColPali engine not available. PDF visual analysis features will be limited.")
+        
         # Web search agent
         web_agent = ToolCallingAgent(
             tools=[search_geotechnical_data, visit_webpage],
@@ -507,7 +717,9 @@ def initialize_agents():
                 calculate_tbm_penetration,
                 calculate_cutter_specs,
                 calculate_specific_energy,
-                predict_cutter_life
+                predict_cutter_life,
+                extract_pdf_features,
+                find_relevant_pdf_sections
             ],
             model=model,
             max_steps=10
@@ -556,7 +768,17 @@ def process_request(request: str):
 # Initialize agent
 web_agent, geotech_agent, manager_agent = initialize_agents()
 
-# Sidebar
+def display_chat_message(msg):
+    try:
+        role_icon = "🧑" if msg["role"] == "user" else "🤖"
+        content = msg["content"]
+        if isinstance(content, (dict, list)):
+            content = json.dumps(content, indent=2)
+        st.markdown(f"{role_icon} **{msg['role'].title()}:** {content}")
+    except Exception as e:
+        st.error(f"Error displaying message: {str(e)}")
+
+# Sidebar with Analysis Tools
 with st.sidebar:
     st.title("🔧 Analysis Tools")
     analysis_type = st.selectbox(
@@ -627,74 +849,142 @@ with st.sidebar:
                     st.session_state.analysis_params["diameter"]
                 )
 
-def display_chat_message(msg):
-    try:
-        role_icon = "🧑" if msg["role"] == "user" else "🤖"
-        content = msg["content"]
-        if isinstance(content, (dict, list)):
-            content = json.dumps(content, indent=2)
-        st.markdown(f"{role_icon} **{msg['role'].title()}:** {content}")
-    except Exception as e:
-        st.error(f"Error displaying message: {str(e)}")
+    # PDF Analysis section in sidebar
+    st.title("📄 PDF Analysis")
+    
+    uploaded_file = st.file_uploader("Upload PDF Document", type="pdf")
+    
+    if uploaded_file is not None:
+        st.session_state.uploaded_pdf = uploaded_file.getvalue()
+        
+        # PDF info display
+        with st.expander("PDF Information", expanded=True):
+            with io.BytesIO(st.session_state.uploaded_pdf) as pdf_data:
+                reader = PyPDF2.PdfReader(pdf_data)
+                st.write(f"Pages: {len(reader.pages)}")
+                st.write(f"Size: {len(st.session_state.uploaded_pdf)/1024:.1f} KB")
+        
+        # Query input for PDF analysis
+        pdf_query = st.text_input("Enter query for PDF analysis:")
+        
+        if st.button("Analyze PDF"):
+            if pdf_query:
+                with st.spinner("Analyzing PDF with ColPali VLM..."):
+                    if COLPALI_AVAILABLE:
+                        st.session_state.pdf_analysis = find_relevant_pdf_sections(
+                            st.session_state.uploaded_pdf, 
+                            pdf_query
+                        )
+                    else:
+                        st.error("ColPali engine not available. Please install colpali-engine.")
+            else:
+                st.warning("Please enter a query for analysis.")
 
 # Main content
 st.title("🏗️ Geotechnical AI Agent by Qwen2.5-Coder-32B-Instruct")
-st.subheader("💬 Chat Interface")
-user_input = st.text_input("Ask a question:")
-if user_input:
-    st.session_state.chat_history.append({"role": "user", "content": user_input})
-    with st.spinner("Processing..."):
-        response = process_request(user_input)
-        st.session_state.chat_history.append({"role": "assistant", "content": response})
 
-# Update chat display section
-chat_container = st.container()
-with chat_container:
-    for msg in st.session_state.chat_history:
-        display_chat_message(msg)
+# Tabs for different functionalities
+chat_tab, analysis_tab, pdf_tab = st.tabs(["Chat", "Analysis Results", "PDF Analysis"])
 
-# Analysis Results Section
-st.subheader("📊 Analysis Results")
-if st.session_state.current_analysis:
-    with st.expander("Detailed Results", expanded=True):
-        st.json(st.session_state.current_analysis)
-    if analysis_type == "Tunnel Support":
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=[0, st.session_state.analysis_params["tunnel_diameter"]],
-            y=[st.session_state.analysis_params["depth"], 
-               st.session_state.analysis_params["depth"]],
-            mode='lines',
-            name='Tunnel Level'
-        ))
-        fig.update_layout(
-            title="Tunnel Cross Section",
-            xaxis_title="Width (m)",
-            yaxis_title="Depth (m)",
-            yaxis_autorange="reversed"
-        )
-        st.plotly_chart(fig)
-    elif analysis_type == "RMR Analysis":
-        if "component_ratings" in st.session_state.current_analysis:
-            ratings = st.session_state.current_analysis["component_ratings"]
-            labels = {
-                "ucs_rating": "UCS",
-                "rqd_rating": "RQD",
-                "spacing_rating": "Spacing",
-                "condition_rating": "Condition",
-                "groundwater_rating": "Groundwater",
-                "orientation_rating": "Orientation"
-            }
-            fig = go.Figure(data=[
-                go.Bar(x=[labels[k] for k in ratings.keys()], 
-                       y=list(ratings.values()))
-            ])
+with chat_tab:
+    st.subheader("💬 Chat Interface")
+    user_input = st.text_input("Ask a question:")
+    if user_input:
+        st.session_state.chat_history.append({"role": "user", "content": user_input})
+        with st.spinner("Processing..."):
+            response = process_request(user_input)
+            st.session_state.chat_history.append({"role": "assistant", "content": response})
+
+    # Update chat display section
+    chat_container = st.container()
+    with chat_container:
+        for msg in st.session_state.chat_history:
+            display_chat_message(msg)
+
+with analysis_tab:
+    st.subheader("📊 Analysis Results")
+    if st.session_state.current_analysis:
+        with st.expander("Detailed Results", expanded=True):
+            st.json(st.session_state.current_analysis)
+        if analysis_type == "Tunnel Support":
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=[0, st.session_state.analysis_params["tunnel_diameter"]],
+                y=[st.session_state.analysis_params["depth"], 
+                   st.session_state.analysis_params["depth"]],
+                mode='lines',
+                name='Tunnel Level'
+            ))
             fig.update_layout(
-                title="RMR Component Ratings",
-                xaxis_title="Parameters",
-                yaxis_title="Rating"
+                title="Tunnel Cross Section",
+                xaxis_title="Width (m)",
+                yaxis_title="Depth (m)",
+                yaxis_autorange="reversed"
             )
             st.plotly_chart(fig)
+        elif analysis_type == "RMR Analysis":
+            if "component_ratings" in st.session_state.current_analysis:
+                ratings = st.session_state.current_analysis["component_ratings"]
+                labels = {
+                    "ucs_rating": "UCS",
+                    "rqd_rating": "RQD",
+                    "spacing_rating": "Spacing",
+                    "condition_rating": "Condition",
+                    "groundwater_rating": "Groundwater",
+                    "orientation_rating": "Orientation"
+                }
+                fig = go.Figure(data=[
+                    go.Bar(x=[labels[k] for k in ratings.keys()], 
+                           y=list(ratings.values()))
+                ])
+                fig.update_layout(
+                    title="RMR Component Ratings",
+                    xaxis_title="Parameters",
+                    yaxis_title="Rating"
+                )
+                st.plotly_chart(fig)
+
+with pdf_tab:
+    if st.session_state.pdf_analysis:
+        if "error" in st.session_state.pdf_analysis:
+            st.error(f"Error during PDF analysis: {st.session_state.pdf_analysis['error']}")
+        else:
+            st.subheader(f"Analysis Results for Query: '{st.session_state.pdf_analysis['query']}'")
+            st.write(f"Total Pages: {st.session_state.pdf_analysis['total_pages']}")
+            
+            # Display relevant sections
+            for i, section in enumerate(st.session_state.pdf_analysis['relevant_sections']):
+                with st.expander(f"Page {section['page_number']} (Score: {section['similarity_score']:.4f})", expanded=i==0):
+                    # Display snippets
+                    for j, snippet in enumerate(section['snippets']):
+                        st.markdown(f"**Snippet {j+1}:**")
+                        st.markdown(f"> {snippet}")
+                    
+                    # Display full page option
+                    if st.checkbox(f"Show full page content for Page {section['page_number']}", key=f"full_page_{i}"):
+                        st.text_area("Full Page Content:", section['content'], height=300)
+                    
+                    # Convert page to image and display
+                    if st.session_state.uploaded_pdf:
+                        with st.spinner("Loading page image..."):
+                            with tempfile.NamedTemporaryFile(suffix=".pdf") as temp_pdf:
+                                temp_pdf.write(st.session_state.uploaded_pdf)
+                                temp_pdf.flush()
+                                
+                                page_images = pdf2image.convert_from_path(
+                                    temp_pdf.name,
+                                    first_page=section['page_number'],
+                                    last_page=section['page_number'],
+                                    dpi=150,
+                                    fmt="jpeg"
+                                )
+                                
+                                if page_images:
+                                    st.image(page_images[0], caption=f"Page {section['page_number']}", use_column_width=True)
+    elif st.session_state.uploaded_pdf:
+        st.info("Upload a PDF and enter a query to analyze it using the ColPali VLM model.")
+    else:
+        st.info("Please upload a PDF document using the sidebar to analyze it.")
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("Built with ❤️ by Kilic Intelligence")
