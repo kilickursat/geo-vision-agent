@@ -4,6 +4,8 @@ import base64
 import io
 import tempfile
 import traceback
+import os
+import shutil
 from typing import Dict, Any, List, Tuple
 from PIL import Image
 import PyPDF2
@@ -12,11 +14,7 @@ import pdf2image
 # Import ColPali model components
 from colpali_engine.models import ColPali, ColPaliProcessor
 
-
-# Add at beginning of handler.py
-import os
-import shutil
-
+# Function to check and clear disk space
 def check_and_clear_space():
     """Check available space and clean up if needed"""
     try:
@@ -40,7 +38,7 @@ def check_and_clear_space():
         print(f"Error checking disk space: {e}")
         return 0
 
-# Call this function before model loading
+# Check disk space before loading model
 check_and_clear_space()
 
 # --- Global model initialization (executed once per worker startup) ---
@@ -156,13 +154,13 @@ def process_pdf_with_colpali(pdf_bytes: bytes, query: str) -> Dict[str, Any]:
                     "snippets": filtered_paragraphs[:3]  # Take up to 3 paragraphs
                 })
         
-        # Return the results
+        # Return the results with safe access to tensor dimensions
         return {
             "status": "success",
             "num_pages": len(pdf_images),
             "page_text": pdf_texts,
-            "embedding_dimensions": image_embeddings.embeddings.shape[1],
-            "tokens_per_page": image_embeddings.embeddings.shape[2],
+            "embedding_dimensions": image_embeddings.shape[1] if len(image_embeddings.shape) > 1 else 0,
+            "tokens_per_page": image_embeddings.shape[2] if len(image_embeddings.shape) > 2 else 0,
             "query_scores": query_scores,
             "relevant_sections": relevant_sections,
             "total_pages": len(pdf_images)
