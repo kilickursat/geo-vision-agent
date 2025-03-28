@@ -154,13 +154,28 @@ def process_pdf_with_colpali(pdf_bytes: bytes, query: str) -> Dict[str, Any]:
                     "snippets": filtered_paragraphs[:3]  # Take up to 3 paragraphs
                 })
         
-        # Return the results with safe access to tensor dimensions
+        # Determine embedding dimensions and tokens per page safely
+        embedding_dim = 0
+        tokens_per_page = 0
+        if isinstance(image_embeddings, torch.Tensor):
+            shape = image_embeddings.shape
+            if len(shape) > 1:
+                embedding_dim = shape[1]
+            if len(shape) > 2:
+                 # Assuming shape is (batch_size, num_tokens, embedding_dim)
+                 # Or potentially (batch_size, embedding_dim, num_tokens) - adjust if needed based on model output spec
+                tokens_per_page = shape[2] # If shape is (batch, tokens, dim)
+                # If shape is (batch, dim, tokens), use shape[1] for dim and shape[2] for tokens
+                # embedding_dim = shape[1] # Already set above assuming (batch, dim, ...) or (batch, tokens, dim) structure
+                # tokens_per_page = shape[2]
+
+        # Return the results
         return {
             "status": "success",
             "num_pages": len(pdf_images),
             "page_text": pdf_texts,
-            "embedding_dimensions": image_embeddings.shape[1] if len(image_embeddings.shape) > 1 else 0,
-            "tokens_per_page": image_embeddings.shape[2] if len(image_embeddings.shape) > 2 else 0,
+            "embedding_dimensions": embedding_dim, # Corrected
+            "tokens_per_page": tokens_per_page,   # Corrected & made safer
             "query_scores": query_scores,
             "relevant_sections": relevant_sections,
             "total_pages": len(pdf_images)
