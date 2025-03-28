@@ -5,4 +5,4 @@ timeout = 60
 [gpu]
 # Request a GPU with at least 16GB VRAM - adjust based on model requirements
 # Examples: "T4", "RTX_3090", "A100", "A100-PCIe-40GB"
-preferred = "RTX_3090"
+preferred = "RTX_4090"
