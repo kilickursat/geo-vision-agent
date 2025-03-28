@@ -7,6 +7,10 @@ import numpy as np
 import plotly.graph_objects as go
 import re
 import requests
+import base64
+import time
+import io
+import tempfile
 from datetime import datetime
 from huggingface_hub import login
 from typing import Dict, List, Any, Tuple
@@ -16,20 +20,9 @@ from smolagents import tool, CodeAgent, HfApiModel, ToolCallingAgent, DuckDuckGo
 import traceback
 import sys
 import os
-import io
-import tempfile
 from PIL import Image
 import PyPDF2
 import pdf2image
-import base64
-import torch
-
-# Try to import ColPali
-try:
-    from colpali_engine.models import ColPali, ColPaliProcessor
-    COLPALI_AVAILABLE = True
-except ImportError:
-    COLPALI_AVAILABLE = False
 
 # Page configuration
 st.set_page_config(
@@ -38,10 +31,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
-
-# Styling
-st.markdown("""
-""", unsafe_allow_html=True)
 
 # Initialize session state
 if 'chat_history' not in st.session_state:
@@ -54,190 +43,95 @@ if 'pdf_analysis' not in st.session_state:
     st.session_state.pdf_analysis = None
 if 'uploaded_pdf' not in st.session_state:
     st.session_state.uploaded_pdf = None
+if 'processing_status' not in st.session_state:
+    st.session_state.processing_status = None
 
-# Initialize ColPali model and processor globals
-colpali_model = None
-colpali_processor = None
-
-def initialize_colpali(device="cuda:0"):
-    """Initialize ColPali model and processor."""
-    global colpali_model, colpali_processor
-    
-    if not COLPALI_AVAILABLE:
-        return None, None
-    
-    if colpali_model is None:
-        try:
-            model_name = "vidore/colpali-v1.3"
-            
-            # Use CPU if GPU not available
-            if not torch.cuda.is_available() and device.startswith("cuda"):
-                device = "cpu"
-                
-            # Check for Apple Silicon
-            if device == "cpu" and torch.backends.mps.is_available():
-                device = "mps"
-                
-            colpali_model = ColPali.from_pretrained(
-                model_name,
-                torch_dtype=torch.bfloat16,
-                device_map=device,
-            ).eval()
-            
-            colpali_processor = ColPaliProcessor.from_pretrained(model_name)
-        except Exception as e:
-            st.error(f"Error initializing ColPali: {str(e)}")
-            return None, None
-    
-    return colpali_model, colpali_processor
-
-def pdf_to_images_and_text(pdf_bytes):
-    """Convert PDF bytes to a list of PIL images and extract text."""
-    images = []
-    texts = []
-    
-    # Read PDF with PyPDF2
-    with io.BytesIO(pdf_bytes) as data:
-        reader = PyPDF2.PdfReader(data)
-        num_pages = len(reader.pages)
-        
-        # Extract text from each page
-        for page_num in range(num_pages):
-            page = reader.pages[page_num]
-            texts.append(page.extract_text())
-        
-        # Convert PDF to images using pdf2image
-        with tempfile.NamedTemporaryFile(suffix=".pdf") as temp_pdf:
-            temp_pdf.write(pdf_bytes)
-            temp_pdf.flush()
-            
-            # Adjust DPI as needed for quality vs performance
-            pdf_images = pdf2image.convert_from_path(
-                temp_pdf.name, 
-                dpi=150,
-                fmt="jpeg"
-            )
-            
-            images.extend(pdf_images)
-    
-    return images, texts
-
-@tool
-def extract_pdf_features(pdf_bytes: bytes, query: str = None) -> Dict[str, Any]:
-    """Extract visual and textual features from PDF using ColPali VLM model.
-    
-    Args:
-        pdf_bytes: The binary content of the PDF file
-        query: Optional query to compare PDF content against
-        
-    Returns:
-        Dictionary containing extracted features, page content, and similarity scores
-    """
+# Runpod API integration functions
+def call_runpod_endpoint(pdf_bytes, query=None):
+    """Call the Runpod serverless endpoint for PDF analysis."""
+    # Get Runpod endpoint URL and API key from secrets
     try:
-        # Initialize the model if not already done
-        model, processor = initialize_colpali()
+        runpod_endpoint_url = st.secrets["runpod"]["endpoint_url"]
+        runpod_api_key = st.secrets["runpod"]["api_key"]
+    except Exception as e:
+        st.error(f"Failed to access Runpod secrets: {str(e)}")
+        return {"error": "Runpod configuration missing. Please check secrets.toml"}
+    
+    try:
+        # Encode PDF bytes to base64
+        pdf_base64 = base64.b64encode(pdf_bytes).decode('utf-8')
         
-        if model is None or processor is None:
-            return {"error": "ColPali model initialization failed"}
-        
-        # Step 1: Convert PDF to images and extract text
-        pdf_images, pdf_text = pdf_to_images_and_text(pdf_bytes)
-        
-        # Step 2: Process the images through ColPali
-        batch_images = processor.process_images(pdf_images).to(model.device)
-        
-        # Step 3: Get image embeddings
-        with torch.no_grad():
-            image_embeddings = model(**batch_images)
-            
-        # Step 4: If query provided, calculate similarity scores
-        query_scores = {}
-        if query:
-            batch_query = processor.process_queries([query]).to(model.device)
-            with torch.no_grad():
-                query_embedding = model(**batch_query)
-            
-            # Calculate similarity scores
-            scores = processor.score_multi_vector(query_embedding, image_embeddings)
-            query_scores = {
-                "query": query,
-                "page_scores": [float(score) for score in scores[0]]
+        # Prepare the payload
+        payload = {
+            "input": {
+                "pdf_base64": pdf_base64,
+                "query": query if query else ""
             }
-        
-        # Step 5: Prepare results
-        result = {
-            "num_pages": len(pdf_images),
-            "page_text": pdf_text,
-            "embedding_dimensions": image_embeddings.embeddings.shape[1],
-            "tokens_per_page": image_embeddings.embeddings.shape[2],
-            "query_scores": query_scores
         }
         
-        return result
-    
-    except Exception as e:
-        return {"error": str(e)}
-
-@tool
-def find_relevant_pdf_sections(pdf_bytes: bytes, query: str) -> Dict[str, Any]:
-    """Find and extract sections from a PDF that are most relevant to a query.
-    
-    Args:
-        pdf_bytes: The binary content of the PDF file
-        query: The search query
-        
-    Returns:
-        Dictionary containing relevant sections, similarity scores, and snippets
-    """
-    try:
-        # First extract features using ColPali
-        features = extract_pdf_features(pdf_bytes, query)
-        
-        if "error" in features:
-            return features
-        
-        # Get the pages with highest similarity scores
-        page_scores = features["query_scores"]["page_scores"]
-        page_text = features["page_text"]
-        
-        # Sort pages by score
-        scored_pages = sorted(
-            [(i, page_scores[i], page_text[i]) for i in range(len(page_scores))],
-            key=lambda x: x[1],
-            reverse=True
-        )
-        
-        # Extract top 3 most relevant pages or fewer if not available
-        top_pages = scored_pages[:min(3, len(scored_pages))]
-        
-        # Extract relevant snippets from each page
-        results = []
-        for page_idx, score, text in top_pages:
-            # Split text into paragraphs
-            paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
-            
-            # Process query and paragraphs for better snippet extraction
-            filtered_paragraphs = []
-            for para in paragraphs:
-                if len(para) > 30:  # Avoid tiny fragments
-                    filtered_paragraphs.append(para)
-            
-            results.append({
-                "page_number": page_idx + 1,
-                "similarity_score": round(float(score), 4),
-                "content": text,
-                "snippets": filtered_paragraphs[:3]  # Take up to 3 paragraphs
-            })
-        
-        return {
-            "query": query,
-            "relevant_sections": results,
-            "total_pages": features["num_pages"]
+        # Set up headers with API key
+        headers = {
+            "Authorization": f"Bearer {runpod_api_key}",
+            "Content-Type": "application/json"
         }
-    
+        
+        # Send synchronous request to Runpod
+        with st.spinner("Connecting to analysis service..."):
+            response = requests.post(
+                runpod_endpoint_url, 
+                json=payload, 
+                headers=headers,
+                timeout=30  # Initial request timeout
+            )
+            response.raise_for_status()
+        
+        # Check for status endpoint in the response (async API)
+        result = response.json()
+        
+        if "id" in result:
+            # This is an async job, poll for results
+            status_url = f"{runpod_endpoint_url.split('/run')[0]}/status/{result['id']}"
+            st.session_state.processing_status = "Processing PDF with ColPali model..."
+            
+            with st.spinner("Processing PDF (this may take a minute)..."):
+                max_attempts = 30  # Maximum number of polling attempts
+                for attempt in range(max_attempts):
+                    status_response = requests.get(status_url, headers=headers)
+                    status_data = status_response.json()
+                    
+                    if status_data.get("status") == "COMPLETED":
+                        st.session_state.processing_status = "Analysis complete"
+                        return status_data.get("output", {})
+                    elif status_data.get("status") in ["FAILED", "CANCELLED"]:
+                        st.session_state.processing_status = "Analysis failed"
+                        return {"error": f"Processing failed: {status_data.get('error', 'Unknown error')}"}
+                    
+                    # Update progress message
+                    progress_msg = f"Processing PDF (attempt {attempt+1}/{max_attempts})..."
+                    st.session_state.processing_status = progress_msg
+                    
+                    # Wait before polling again (exponential backoff with cap)
+                    wait_time = min(2 * (1.5 ** attempt), 15)
+                    time.sleep(wait_time)
+                
+                # If we've exhausted all attempts
+                st.session_state.processing_status = "Analysis timed out"
+                return {"error": "PDF analysis timed out. Please try again or with a smaller document."}
+        else:
+            # Direct result (sync API)
+            st.session_state.processing_status = "Analysis complete"
+            return result
+            
+    except requests.exceptions.RequestException as e:
+        st.session_state.processing_status = "Connection error"
+        st.error(f"Failed to connect to PDF analysis service: {str(e)}")
+        return {"error": f"Connection error: {str(e)}"}
     except Exception as e:
-        return {"error": str(e)}
+        st.session_state.processing_status = "Error occurred"
+        st.error(f"Error processing PDF analysis: {str(e)}")
+        return {"error": f"Error: {str(e)}"}
 
+# Tools
 @tool
 def visit_webpage(url: str) -> str:
     """Visits a webpage at the given URL and returns its content as a markdown string.
@@ -267,7 +161,7 @@ def search_geotechnical_data(query: str) -> str:
     """
     search_tool = DuckDuckGoSearchTool()
     try:
-        results = search_tool(query)  # Changed from .run() to direct call
+        results = search_tool(query)
         return str(results)
     except Exception as e:
         return f"Search error: {str(e)}"
@@ -660,6 +554,60 @@ def predict_cutter_life(ucs: float, penetration: float, rpm: float, diameter: fl
           (diameter ** constants['C5']) * (cai ** constants['C6']))
     return {"cutter_life_m3": cl}
 
+@tool
+def find_relevant_pdf_sections(pdf_bytes: bytes, query: str) -> Dict[str, Any]:
+    """Find and extract sections from a PDF that are most relevant to a query using Runpod API.
+    
+    Args:
+        pdf_bytes: The binary content of the PDF file
+        query: The search query
+        
+    Returns:
+        Dictionary containing relevant sections, similarity scores, and snippets
+    """
+    # Call the Runpod API
+    result = call_runpod_endpoint(pdf_bytes, query)
+    
+    # Check for errors
+    if "error" in result or result.get("status") == "error":
+        error_message = result.get("error", result.get("message", "Unknown error"))
+        return {"error": error_message}
+    
+    # Return the processed results
+    return {
+        "query": query,
+        "relevant_sections": result.get("relevant_sections", []),
+        "total_pages": result.get("num_pages", result.get("total_pages", 0))
+    }
+
+@tool
+def extract_pdf_features(pdf_bytes: bytes, query: str = None) -> Dict[str, Any]:
+    """Extract visual and textual features from PDF using Runpod-hosted ColPali VLM model.
+    
+    Args:
+        pdf_bytes: The binary content of the PDF file
+        query: Optional query to compare PDF content against
+        
+    Returns:
+        Dictionary containing extracted features, page content, and similarity scores
+    """
+    # Call the Runpod API
+    result = call_runpod_endpoint(pdf_bytes, query)
+    
+    # Check for errors
+    if "error" in result or result.get("status") == "error":
+        error_message = result.get("error", result.get("message", "Unknown error"))
+        return {"error": error_message}
+    
+    # Return the processed results
+    return {
+        "num_pages": result.get("num_pages", 0),
+        "page_text": result.get("page_text", []),
+        "embedding_dimensions": result.get("embedding_dimensions", 0),
+        "tokens_per_page": result.get("tokens_per_page", 0),
+        "query_scores": result.get("query_scores", {})
+    }
+
 def initialize_agents():
     try:
         # Try to get the Hugging Face API key from secrets or environment variable
@@ -668,7 +616,7 @@ def initialize_agents():
             # Access nested secret properly
             hf_key = st.secrets["huggingface"]["HUGGINGFACE_API_KEY"]
         except Exception as e:
-            st.warning(f"Couldn't access secrets: {str(e)}")
+            st.warning(f"Couldn't access Hugging Face secrets: {str(e)}")
             hf_key = os.environ.get("HUGGINGFACE_API_KEY")
 
         if not hf_key:
@@ -685,16 +633,14 @@ def initialize_agents():
         login(hf_key)
         model = HfApiModel("Qwen/Qwen2.5-Coder-32B-Instruct")
         
-        # Initialize ColPali model if available
-        if COLPALI_AVAILABLE:
-            try:
-                colpali_model, colpali_processor = initialize_colpali()
-                if colpali_model:
-                    st.success("ColPali VLM model initialized successfully.")
-            except Exception as e:
-                st.warning(f"Could not initialize ColPali model: {str(e)}")
-        else:
-            st.warning("ColPali engine not available. PDF visual analysis features will be limited.")
+        # Check if Runpod configuration is available
+        try:
+            runpod_endpoint_url = st.secrets["runpod"]["endpoint_url"]
+            runpod_api_key = st.secrets["runpod"]["api_key"]
+            st.success("Runpod API configuration found. PDF analysis will use Runpod Serverless.")
+        except Exception as e:
+            st.warning(f"Runpod configuration not found: {str(e)}")
+            st.warning("PDF analysis features will be limited without Runpod configuration.")
         
         # Web search agent
         web_agent = ToolCallingAgent(
@@ -765,8 +711,41 @@ def process_request(request: str):
     except Exception as e:
         return f"Error: {str(e)}"  # Simplified error message
 
-# Initialize agent
-web_agent, geotech_agent, manager_agent = initialize_agents()
+def pdf_to_images_and_text(pdf_bytes):
+    """Convert PDF bytes to images and text locally (for display purposes only).
+    This doesn't use the ColPali model - only for previewing pages."""
+    try:
+        images = []
+        texts = []
+        
+        # Read PDF with PyPDF2
+        with io.BytesIO(pdf_bytes) as data:
+            reader = PyPDF2.PdfReader(data)
+            num_pages = len(reader.pages)
+            
+            # Extract text from each page
+            for page_num in range(num_pages):
+                page = reader.pages[page_num]
+                texts.append(page.extract_text())
+            
+            # Convert PDF to images using pdf2image
+            with tempfile.NamedTemporaryFile(suffix=".pdf") as temp_pdf:
+                temp_pdf.write(pdf_bytes)
+                temp_pdf.flush()
+                
+                # Adjust DPI as needed for quality vs performance
+                pdf_images = pdf2image.convert_from_path(
+                    temp_pdf.name, 
+                    dpi=150,
+                    fmt="jpeg"
+                )
+                
+                images.extend(pdf_images)
+        
+        return images, texts
+    except Exception as e:
+        st.error(f"Error processing PDF: {str(e)}")
+        return [], []
 
 def display_chat_message(msg):
     try:
@@ -778,7 +757,10 @@ def display_chat_message(msg):
     except Exception as e:
         st.error(f"Error displaying message: {str(e)}")
 
-# Sidebar with Analysis Tools
+# Initialize agent
+web_agent, geotech_agent, manager_agent = initialize_agents()
+
+# Sidebar
 with st.sidebar:
     st.title("🔧 Analysis Tools")
     analysis_type = st.selectbox(
@@ -869,19 +851,21 @@ with st.sidebar:
         
         if st.button("Analyze PDF"):
             if pdf_query:
-                with st.spinner("Analyzing PDF with ColPali VLM..."):
-                    if COLPALI_AVAILABLE:
-                        st.session_state.pdf_analysis = find_relevant_pdf_sections(
-                            st.session_state.uploaded_pdf, 
-                            pdf_query
-                        )
-                    else:
-                        st.error("ColPali engine not available. Please install colpali-engine.")
+                st.session_state.processing_status = "Preparing PDF for analysis..."
+                with st.spinner("Analyzing PDF with ColPali VLM via Runpod..."):
+                    st.session_state.pdf_analysis = find_relevant_pdf_sections(
+                        st.session_state.uploaded_pdf, 
+                        pdf_query
+                    )
             else:
                 st.warning("Please enter a query for analysis.")
 
 # Main content
 st.title("🏗️ Geotechnical AI Agent by Qwen2.5-Coder-32B-Instruct")
+
+# Show processing status if available
+if st.session_state.processing_status:
+    st.info(f"Status: {st.session_state.processing_status}")
 
 # Tabs for different functionalities
 chat_tab, analysis_tab, pdf_tab = st.tabs(["Chat", "Analysis Results", "PDF Analysis"])
@@ -964,25 +948,19 @@ with pdf_tab:
                     if st.checkbox(f"Show full page content for Page {section['page_number']}", key=f"full_page_{i}"):
                         st.text_area("Full Page Content:", section['content'], height=300)
                     
-                    # Convert page to image and display
+                    # Convert page to image and display (use local function for preview)
                     if st.session_state.uploaded_pdf:
                         with st.spinner("Loading page image..."):
-                            with tempfile.NamedTemporaryFile(suffix=".pdf") as temp_pdf:
-                                temp_pdf.write(st.session_state.uploaded_pdf)
-                                temp_pdf.flush()
-                                
-                                page_images = pdf2image.convert_from_path(
-                                    temp_pdf.name,
-                                    first_page=section['page_number'],
-                                    last_page=section['page_number'],
-                                    dpi=150,
-                                    fmt="jpeg"
-                                )
-                                
-                                if page_images:
-                                    st.image(page_images[0], caption=f"Page {section['page_number']}", use_column_width=True)
+                            try:
+                                images, _ = pdf_to_images_and_text(st.session_state.uploaded_pdf)
+                                if images and section['page_number'] <= len(images):
+                                    st.image(images[section['page_number']-1], caption=f"Page {section['page_number']}", use_column_width=True)
+                                else:
+                                    st.warning(f"Preview not available for page {section['page_number']}")
+                            except Exception as e:
+                                st.error(f"Error loading preview: {str(e)}")
     elif st.session_state.uploaded_pdf:
-        st.info("Upload a PDF and enter a query to analyze it using the ColPali VLM model.")
+        st.info("Upload a PDF and enter a query to analyze it using the ColPali VLM model via Runpod.")
     else:
         st.info("Please upload a PDF document using the sidebar to analyze it.")
 
