@@ -12,6 +12,37 @@ import pdf2image
 # Import ColPali model components
 from colpali_engine.models import ColPali, ColPaliProcessor
 
+
+# Add at beginning of handler.py
+import os
+import shutil
+
+def check_and_clear_space():
+    """Check available space and clean up if needed"""
+    try:
+        stats = shutil.disk_usage("/")
+        free_mb = stats.free / (1024 * 1024)
+        print(f"Available disk space: {free_mb:.2f} MB")
+        
+        if free_mb < 1000:  # If less than 1GB free
+            print("Low disk space detected. Cleaning caches...")
+            os.system("rm -rf /root/.cache/huggingface/hub/*")
+            os.system("rm -rf /tmp/*")
+            os.system("pip cache purge")
+            
+            # Check space after cleanup
+            stats = shutil.disk_usage("/")
+            free_mb = stats.free / (1024 * 1024)
+            print(f"Available disk space after cleanup: {free_mb:.2f} MB")
+            
+        return free_mb
+    except Exception as e:
+        print(f"Error checking disk space: {e}")
+        return 0
+
+# Call this function before model loading
+check_and_clear_space()
+
 # --- Global model initialization (executed once per worker startup) ---
 DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 MODEL_NAME = "vidore/colpali-v1.3"
