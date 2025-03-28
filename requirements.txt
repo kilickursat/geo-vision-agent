@@ -1,25 +1,28 @@
+# Core dependencies
 streamlit
 torch
 transformers
-pillow
-docling
+pandas
+numpy
+plotly
+requests
+markdownify
+
+# Hugging Face and AI agents
+huggingface_hub
+smolagents
+
+# PDF processing
+colpali-engine>=0.3.0,<0.4.0
+PyPDF2>=3.0.0
+pdf2image>=1.16.0
+pillow>=9.0.0
+
+# Web application
 flask
 flask-socketio
-pandas
-numpy
-requests
-markdownify
-smolagents
-huggingface_hub
-plotly
 gunicorn
 python-dotenv
-streamlit
-huggingface_hub
-smolagents
-plotly
-pandas
-numpy
-transformers
-requests
-markdownify
+
+# Document processing
+docling
