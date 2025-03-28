@@ -13,6 +13,3 @@ backgroundColor = "#FFFFFF"
 secondaryBackgroundColor = "#F0F2F6"
 textColor = "#262730"
 
-[runpod]
-endpoint_url = "https://api.runpod.ai/v2/qllglas48bku6u/run"
-api_key = "rpa_IH69SD020IOTGPCLEZ873WGL2DEWT9RUMN8STHOE1qrw58"
