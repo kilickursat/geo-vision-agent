@@ -8,7 +8,7 @@ WORKDIR /app
 
 # Copy requirements and install dependencies
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --ignore-installed blinker -r requirements.txt
 
 # Copy the handler code
 COPY handler.py .
