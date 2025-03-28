@@ -17,7 +17,7 @@ RUN pip install --no-cache-dir --ignore-installed blinker -r requirements.txt &&
 # Clear cache before downloading the model
 RUN rm -rf /root/.cache/huggingface/hub/* && \
     mkdir -p /root/.cache/huggingface/hub/
-
+RUN apt-get update && apt-get install -y poppler-utils
 # Copy the handler code
 COPY handler.py .
 
