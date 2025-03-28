@@ -12,3 +12,7 @@ primaryColor = "#4B8BBE"
 backgroundColor = "#FFFFFF"
 secondaryBackgroundColor = "#F0F2F6"
 textColor = "#262730"
+
+[runpod]
+endpoint_url = "https://api.runpod.ai/v2/YOUR_ENDPOINT_ID/run"
+api_key = "YOUR_RUNPOD_API_KEY"
