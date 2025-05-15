@@ -8,9 +8,10 @@ import plotly.graph_objects as go
 import re
 import requests
 import base64
-import time
 import io
 import tempfile
+import time
+import hashlib
 from datetime import datetime
 from huggingface_hub import login
 from typing import Dict, List, Any, Tuple
@@ -23,6 +24,17 @@ import os
 from PIL import Image
 import PyPDF2
 import pdf2image
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("geotechnical_app.log")
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # Page configuration
 st.set_page_config(
@@ -45,6 +57,10 @@ if 'uploaded_pdf' not in st.session_state:
     st.session_state.uploaded_pdf = None
 if 'processing_status' not in st.session_state:
     st.session_state.processing_status = None
+if 'pdf_page_images' not in st.session_state:
+    st.session_state.pdf_page_images = []
+if 'current_pdf_hash' not in st.session_state:
+    st.session_state.current_pdf_hash = None
 
 # Runpod API integration functions
 def call_runpod_endpoint(pdf_bytes, query=None):
@@ -54,7 +70,7 @@ def call_runpod_endpoint(pdf_bytes, query=None):
         runpod_endpoint_url = st.secrets["runpod"]["endpoint_url"]
         runpod_api_key = st.secrets["runpod"]["api_key"]
     except Exception as e:
-        st.error(f"Failed to access Runpod secrets: {str(e)}")
+        logger.error(f"Failed to access Runpod secrets: {str(e)}")
         return {"error": "Runpod configuration missing. Please check secrets.toml"}
     
     try:
@@ -124,11 +140,11 @@ def call_runpod_endpoint(pdf_bytes, query=None):
             
     except requests.exceptions.RequestException as e:
         st.session_state.processing_status = "Connection error"
-        st.error(f"Failed to connect to PDF analysis service: {str(e)}")
+        logger.error(f"Failed to connect to PDF analysis service: {str(e)}")
         return {"error": f"Connection error: {str(e)}"}
     except Exception as e:
         st.session_state.processing_status = "Error occurred"
-        st.error(f"Error processing PDF analysis: {str(e)}")
+        logger.error(f"Error processing PDF analysis: {str(e)}\n{traceback.format_exc()}")
         return {"error": f"Error: {str(e)}"}
 
 # Tools
@@ -183,6 +199,18 @@ def classify_soil(soil_type: str, plasticity_index: float, liquid_limit: float) 
             return {"classification": "CI", "description": "Medium plasticity clay"}
         else:
             return {"classification": "CL", "description": "Low plasticity clay"}
+    elif soil_type.lower() == 'sand':
+        if plasticity_index < 4 and liquid_limit < 50:
+            return {"classification": "SP", "description": "Poorly graded sand"}
+        elif plasticity_index < 7 and liquid_limit < 50:
+            return {"classification": "SW", "description": "Well-graded sand"}
+        else:
+            return {"classification": "SC", "description": "Clayey sand"}
+    elif soil_type.lower() == 'silt':
+        if liquid_limit < 50:
+            return {"classification": "ML", "description": "Low plasticity silt"}
+        else:
+            return {"classification": "MH", "description": "High plasticity silt"}
     return {"classification": "Unknown", "description": "Unknown soil type"}
 
 @tool
@@ -439,7 +467,7 @@ def import_borehole_data(file_path: str) -> Dict:
             "soil_profile": df.groupby('soil_type')['depth'].agg(['min', 'max']).to_dict()
         }
     except Exception as e:
-        logging.error(f"Error processing borehole data: {e}")
+        logger.error(f"Error processing borehole data: {e}")
         raise
 
 @tool
@@ -608,109 +636,6 @@ def extract_pdf_features(pdf_bytes: bytes, query: str = None) -> Dict[str, Any]:
         "query_scores": result.get("query_scores", {})
     }
 
-def initialize_agents():
-    try:
-        # Try to get the Hugging Face API key from secrets or environment variable
-        hf_key = None
-        try:
-            # Access nested secret properly
-            hf_key = st.secrets["huggingface"]["HUGGINGFACE_API_KEY"]
-        except Exception as e:
-            st.warning(f"Couldn't access Hugging Face secrets: {str(e)}")
-            hf_key = os.environ.get("HUGGINGFACE_API_KEY")
-
-        if not hf_key:
-            st.warning("""
-                **Hugging Face API key not found.**  
-                Please add your key to either:
-                - A `secrets.toml` file (for local development)
-                - Environment variables (for deployment)
-                
-                The app will continue with limited functionality.
-            """)
-            return None, None, None
-
-        login(hf_key)
-        model = HfApiModel("Qwen/Qwen2.5-Coder-32B-Instruct")
-        
-        # Check if Runpod configuration is available
-        try:
-            runpod_endpoint_url = st.secrets["runpod"]["endpoint_url"]
-            runpod_api_key = st.secrets["runpod"]["api_key"]
-            st.success("Runpod API configuration found. PDF analysis will use Runpod Serverless.")
-        except Exception as e:
-            st.warning(f"Runpod configuration not found: {str(e)}")
-            st.warning("PDF analysis features will be limited without Runpod configuration.")
-        
-        # Web search agent
-        web_agent = ToolCallingAgent(
-            tools=[search_geotechnical_data, visit_webpage],
-            model=model,
-            max_steps=10
-        )
-        
-        # Geotech calculation agent
-        geotech_agent = ToolCallingAgent(
-            tools=[
-                classify_soil,
-                calculate_tunnel_support,
-                calculate_rmr,
-                calculate_q_system,
-                estimate_tbm_performance,
-                analyze_face_stability,
-                import_borehole_data,
-                visualize_3d_results,
-                calculate_tbm_penetration,
-                calculate_cutter_specs,
-                calculate_specific_energy,
-                predict_cutter_life,
-                extract_pdf_features,
-                find_relevant_pdf_sections
-            ],
-            model=model,
-            max_steps=10
-        )
-        
-        # Manager agent with search_geotechnical_data tool
-        manager_agent = CodeAgent(
-            tools=[search_geotechnical_data],
-            model=model,
-            additional_authorized_imports=["time", "numpy", "pandas"]
-        )
-        
-        return web_agent, geotech_agent, manager_agent
-    except Exception as e:
-        st.error(f"Failed to initialize agents: {str(e)}\nFull traceback:\n{traceback.format_exc()}")
-        return None, None, None
-
-def process_request(request: str):
-    try:
-        # First check if this is a domain-specific term we should handle directly
-        if request.lower().strip() in ["what is ucs", "ucs", "ucs definition"]:
-            return """UCS (Uniaxial Compressive Strength) is a fundamental geotechnical parameter measuring a rock sample's maximum compressive strength when subjected to axial stress without lateral constraints. Expressed in MPa, it's a critical input for rock mass classification, tunnel design, and excavation stability analysis."""
-            
-        # Continue with normal processing
-        web_result = search_geotechnical_data(request)
-        geotech_result = geotech_agent(task=request)  # Using corrected parameter name
-        
-        # Rest of function as before
-        final_result = list(manager_agent.run(
-            request,
-            {
-                "web_data": web_result,
-                "technical_analysis": str(geotech_result)
-            }
-        ))
-        
-        # Return the appropriate result
-        if final_result:
-            result = final_result[-1].content if hasattr(final_result[-1], 'content') else final_result[-1]
-            return result
-        else:
-            return "No results generated"
-    except Exception as e:
-        return f"Error: {str(e)}"  # Simplified error message
-
 def pdf_to_images_and_text(pdf_bytes):
     """Convert PDF bytes to images and text locally (for display purposes only).
     This doesn't use the ColPali model - only for previewing pages."""
@@ -744,18 +669,257 @@ def pdf_to_images_and_text(pdf_bytes):
         
         return images, texts
     except Exception as e:
-        st.error(f"Error processing PDF: {str(e)}")
+        logger.error(f"Error processing PDF: {e}\n{traceback.format_exc()}")
         return [], []
 
 def display_chat_message(msg):
+    """Display a chat message in the Streamlit interface."""
     try:
-        role_icon = "🧑" if msg["role"] == "user" else "🤖"
-        content = msg["content"]
-        if isinstance(content, (dict, list)):
-            content = json.dumps(content, indent=2)
-        st.markdown(f"{role_icon} **{msg['role'].title()}:** {content}")
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
     except Exception as e:
-        st.error(f"Error displaying message: {str(e)}")
+        logger.error(f"Error displaying message: {str(e)}")
+
+def initialize_agents():
+    """Initialize the multi-agent system with Qwen2.5-Coder-32B-Instruct model."""
+    try:
+        # Try to get the Hugging Face API key from secrets or environment variable
+        hf_key = None
+        try:
+            # Access nested secret properly
+            hf_key = st.secrets["huggingface"]["HUGGINGFACE_API_KEY"]
+        except Exception as e:
+            logger.warning(f"Couldn't access Hugging Face secrets: {str(e)}")
+            hf_key = os.environ.get("HUGGINGFACE_API_KEY")
+
+        if not hf_key:
+            st.warning("""
+                **Hugging Face API key not found.**  
+                Please add your key to either:
+                - A `secrets.toml` file (for local development)
+                - Environment variables (for deployment)
+                
+                The app will continue with limited functionality.
+            """)
+            return None, None, None
+
+        login(hf_key)
+        model = HfApiModel("Qwen/Qwen2.5-Coder-32B-Instruct")
+        
+        # Check if Runpod configuration is available
+        try:
+            runpod_endpoint_url = st.secrets["runpod"]["endpoint_url"]
+            runpod_api_key = st.secrets["runpod"]["api_key"]
+            st.success("Runpod API configuration found. PDF analysis will use Runpod Serverless.")
+        except Exception as e:
+            logger.warning(f"Runpod configuration not found: {str(e)}")
+            st.warning("PDF analysis features will be limited without Runpod configuration.")
+        
+        # Web search agent
+        web_agent = ToolCallingAgent(
+            tools=[search_geotechnical_data, visit_webpage],
+            model=model,
+            max_steps=10
+        )
+        
+        # Geotech calculation agent
+        geotech_agent = ToolCallingAgent(
+            tools=[
+                classify_soil,
+                calculate_tunnel_support,
+                calculate_rmr,
+                calculate_q_system,
+                estimate_tbm_performance,
+                analyze_face_stability,
+                import_borehole_data,
+                visualize_3d_results,
+                calculate_tbm_penetration,
+                calculate_cutter_specs,
+                calculate_specific_energy,
+                predict_cutter_life,
+                extract_pdf_features,
+                find_relevant_pdf_sections
+            ],
+            model=model,
+            max_steps=10
+        )
+        
+        # Manager agent
+        manager_agent = CodeAgent(
+            tools=[search_geotechnical_data],
+            model=model,
+            additional_authorized_imports=["time", "numpy", "pandas"]
+        )
+        
+        return web_agent, geotech_agent, manager_agent
+    except Exception as e:
+        logger.error(f"Failed to initialize agents: {str(e)}\n{traceback.format_exc()}")
+        st.error(f"Failed to initialize agents: {str(e)}")
+        return None, None, None
+
+def process_request(user_input: str):
+    """
+    Process user requests through the multi-agent system, handling both general queries
+    and PDF-specific analysis with intelligent synthesis.
+    
+    Args:
+        user_input: The user's question or request
+        
+    Returns:
+        A synthesized response from the appropriate agent(s)
+    """
+    try:
+        # First check if this is a domain-specific term we should handle directly
+        if user_input.lower().strip() in ["what is ucs", "ucs", "ucs definition"]:
+            return """UCS (Uniaxial Compressive Strength) is a fundamental geotechnical parameter measuring a rock sample's maximum compressive strength when subjected to axial stress without lateral constraints. Expressed in MPa, it's a critical input for rock mass classification, tunnel design, and excavation stability analysis."""
+        
+        final_response = "I couldn't find relevant information to answer your question."
+        
+        # PDF-related query processing
+        if st.session_state.get("uploaded_pdf"):
+            st.session_state.processing_status = "Analyzing PDF for your query..."
+            
+            # Get PDF analysis results using the enhanced ColPali implementation
+            pdf_analysis_result = find_relevant_pdf_sections(
+                pdf_bytes=st.session_state.uploaded_pdf,
+                query=user_input
+            )
+            
+            # Clear the processing status
+            st.session_state.processing_status = None
+            
+            # Process the PDF analysis results
+            if pdf_analysis_result and not pdf_analysis_result.get("error"):
+                # Extract all snippets from the relevant sections
+                extracted_snippets = []
+                for section in pdf_analysis_result.get("relevant_sections", []):
+                    for snippet in section.get("snippets", []):
+                        # Ensure each snippet is properly formatted and substantial
+                        if snippet and len(snippet.strip()) > 20:
+                            extracted_snippets.append(snippet.strip())
+                
+                # If we have meaningful snippets, synthesize an answer
+                if extracted_snippets:
+                    # Format snippets as a numbered list for the synthesis prompt
+                    snippet_context = "\n".join([f"{i+1}. \"{s}\"" for i, s in enumerate(extracted_snippets)])
+                    
+                    # Create a comprehensive synthesis prompt for the manager_agent
+                    synthesis_prompt = f"""Based only on the following relevant information extracted from the PDF document, please answer the user's query.
+
+User Query: "{user_input}"
+
+Extracted Information:
+{snippet_context}
+
+Please provide a direct and comprehensive answer to the user's query using only the extracted information. Structure your response as a natural language answer that directly addresses the question without referring to "snippets," "extracts," or "pages." If the provided information is insufficient to answer the query, please state that clearly.
+"""
+                    
+                    st.session_state.processing_status = "Synthesizing answer..."
+                    
+                    try:
+                        # Use manager_agent (Qwen) to generate the synthesized response
+                        manager_result = list(manager_agent.run(synthesis_prompt))
+                        
+                        # Extract the final response content
+                        if manager_result:
+                            if hasattr(manager_result[-1], 'content'):
+                                final_response = manager_result[-1].content
+                            else:
+                                final_response = str(manager_result[-1])
+                        else:
+                            final_response = "I found relevant information in the PDF but couldn't synthesize a complete answer."
+                    except Exception as e:
+                        logger.error(f"Error during answer synthesis: {str(e)}\n{traceback.format_exc()}")
+                        final_response = "I found relevant information in the PDF but encountered an error when formulating the answer."
+                    
+                    st.session_state.processing_status = None
+                else:
+                    final_response = "I analyzed the PDF but couldn't find information specifically relevant to your query."
+                
+                # Store the detailed PDF analysis for the PDF tab
+                st.session_state.pdf_analysis = pdf_analysis_result
+                
+                # Cache PDF page images for efficient display in the PDF tab
+                if "pdf_page_images" not in st.session_state or st.session_state.get("current_pdf_hash") != hash(str(st.session_state.get("uploaded_pdf"))):
+                    with st.spinner("Preparing PDF page previews..."):
+                        try:
+                            images, _ = pdf_to_images_and_text(st.session_state.uploaded_pdf)
+                            st.session_state.pdf_page_images = images
+                            st.session_state.current_pdf_hash = hash(str(st.session_state.uploaded_pdf))
+                        except Exception as img_error:
+                            logger.error(f"Error preparing PDF previews: {str(img_error)}")
+                            st.session_state.pdf_page_images = []
+                
+            elif pdf_analysis_result and pdf_analysis_result.get("error"):
+                error_message = pdf_analysis_result.get("error")
+                logger.error(f"PDF analysis error: {error_message}")
+                final_response = f"I encountered an issue when analyzing the PDF: {error_message}"
+            else:
+                final_response = "I couldn't properly analyze the PDF document. Please try again or with a different query."
+        
+        # Non-PDF query handling through the multi-agent system
+        else:
+            st.session_state.processing_status = "Processing your request..."
+            
+            # Get web search results if appropriate for the query
+            web_output = list(web_agent(user_input))
+            web_result_str = ""
+            if web_output:
+                if hasattr(web_output[-1], 'content'):
+                    web_result_str = web_output[-1].content
+                else:
+                    web_result_str = str(web_output[-1])
+            
+            # Determine if this query is suitable for geotechnical calculations
+            # First, check if it's a calculation-related query
+            is_calculation_query = any(term in user_input.lower() for term in [
+                "calculate", "computation", "analysis", "soil", "rock", "tunnel", 
+                "pressure", "support", "stability", "tbm", "boring", "classification"
+            ])
+            
+            geotech_result_str = ""
+            if is_calculation_query:
+                # Perform technical analysis with the geotechnical agent
+                geotech_output = list(geotech_agent(user_input))
+                if geotech_output:
+                    if hasattr(geotech_output[-1], 'content'):
+                        geotech_result_str = geotech_output[-1].content
+                    else:
+                        geotech_result_str = str(geotech_output[-1])
+            
+            # Prepare context for the manager agent
+            agent_context = {
+                "web_data": web_result_str if web_result_str else "No relevant web search information found.",
+                "technical_analysis": geotech_result_str if geotech_result_str else "No specific technical analysis performed."
+            }
+            
+            # Use manager agent to synthesize the final response
+            manager_prompt = f"""
+User Query: {user_input}
+
+Please synthesize a comprehensive response based on the following information:
+1. Web Search Results: {agent_context['web_data']}
+2. Technical Analysis: {agent_context['technical_analysis']}
+
+Provide a clear, concise answer that addresses the user's query directly. If the information is insufficient, acknowledge that and suggest what other information might be helpful.
+"""
+            
+            # Get the final response from the manager agent
+            manager_result = list(manager_agent.run(manager_prompt))
+            
+            if manager_result:
+                if hasattr(manager_result[-1], 'content'):
+                    final_response = manager_result[-1].content
+                else:
+                    final_response = str(manager_result[-1])
+            
+            st.session_state.processing_status = None
+        
+        return final_response
+        
+    except Exception as e:
+        logger.error(f"Error in process_request: {str(e)}\n{traceback.format_exc()}")
+        return f"I encountered an unexpected error when processing your request. Please try again or rephrase your query."
 
 # Initialize agent
 web_agent, geotech_agent, manager_agent = initialize_agents()
@@ -872,18 +1036,28 @@ chat_tab, analysis_tab, pdf_tab = st.tabs(["Chat", "Analysis Results", "PDF Anal
 
 with chat_tab:
     st.subheader("💬 Chat Interface")
-    user_input = st.text_input("Ask a question:")
-    if user_input:
-        st.session_state.chat_history.append({"role": "user", "content": user_input})
-        with st.spinner("Processing..."):
-            response = process_request(user_input)
+    
+    # Display previous chat messages
+    for msg in st.session_state.chat_history:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+    
+    # Chat input with the modern st.chat_input component
+    if user_prompt := st.chat_input("Ask a question or describe your task:"):
+        # Add user message to chat history and display immediately
+        st.session_state.chat_history.append({"role": "user", "content": user_prompt})
+        with st.chat_message("user"):
+            st.markdown(user_prompt)
+        
+        # Process the user's request and display assistant response
+        with st.chat_message("assistant"):
+            message_placeholder = st.empty()
+            with st.spinner(st.session_state.get("processing_status", "Processing...")):
+                response = process_request(user_prompt)
+            message_placeholder.markdown(response)
+            
+            # Add assistant response to chat history
             st.session_state.chat_history.append({"role": "assistant", "content": response})
-
-    # Update chat display section
-    chat_container = st.container()
-    with chat_container:
-        for msg in st.session_state.chat_history:
-            display_chat_message(msg)
 
 with analysis_tab:
     st.subheader("📊 Analysis Results")
@@ -929,38 +1103,38 @@ with analysis_tab:
                 st.plotly_chart(fig)
 
 with pdf_tab:
+    st.subheader("📊 PDF Analysis Results")
+    
     if st.session_state.pdf_analysis:
         if "error" in st.session_state.pdf_analysis:
             st.error(f"Error during PDF analysis: {st.session_state.pdf_analysis['error']}")
         else:
-            st.subheader(f"Analysis Results for Query: '{st.session_state.pdf_analysis['query']}'")
-            st.write(f"Total Pages: {st.session_state.pdf_analysis['total_pages']}")
+            st.write(f"**Analysis Results for Query:** '{st.session_state.pdf_analysis.get('query', 'Unknown')}'")
+            st.write(f"**Total Pages:** {st.session_state.pdf_analysis.get('total_pages', 0)}")
             
-            # Display relevant sections
-            for i, section in enumerate(st.session_state.pdf_analysis['relevant_sections']):
-                with st.expander(f"Page {section['page_number']} (Score: {section['similarity_score']:.4f})", expanded=i==0):
+            # Display relevant sections with detailed information
+            for i, section in enumerate(st.session_state.pdf_analysis.get('relevant_sections', [])):
+                with st.expander(f"Page {section.get('page_number', 'Unknown')} (Score: {section.get('similarity_score', 0):.4f})", expanded=i==0):
                     # Display snippets
-                    for j, snippet in enumerate(section['snippets']):
+                    for j, snippet in enumerate(section.get('snippets', [])):
                         st.markdown(f"**Snippet {j+1}:**")
                         st.markdown(f"> {snippet}")
                     
-                    # Display full page option
-                    if st.checkbox(f"Show full page content for Page {section['page_number']}", key=f"full_page_{i}"):
-                        st.text_area("Full Page Content:", section['content'], height=300)
+                    # Option to view full page content
+                    if st.checkbox(f"Show full page content for Page {section.get('page_number', 'Unknown')}", key=f"full_page_{i}"):
+                        st.text_area("Full Page Content:", section.get('content', ''), height=300)
                     
-                    # Convert page to image and display (use local function for preview)
-                    if st.session_state.uploaded_pdf:
-                        with st.spinner("Loading page image..."):
-                            try:
-                                images, _ = pdf_to_images_and_text(st.session_state.uploaded_pdf)
-                                if images and section['page_number'] <= len(images):
-                                    st.image(images[section['page_number']-1], caption=f"Page {section['page_number']}", use_container_width=True)
-                                else:
-                                    st.warning(f"Preview not available for page {section['page_number']}")
-                            except Exception as e:
-                                st.error(f"Error loading preview: {str(e)}")
+                    # Display page image preview using cached images
+                    if st.checkbox(f"Show image preview for Page {section.get('page_number', 'Unknown')}", key=f"img_preview_page_{i}"):
+                        page_num = section.get('page_number', 0)
+                        if "pdf_page_images" in st.session_state and page_num > 0 and page_num <= len(st.session_state.pdf_page_images):
+                            st.image(st.session_state.pdf_page_images[page_num-1], 
+                                     caption=f"Page {page_num}", 
+                                     use_container_width=True)
+                        else:
+                            st.warning(f"Preview not available for page {page_num}")
     elif st.session_state.uploaded_pdf:
-        st.info("Upload a PDF and enter a query to analyze it using the ColPali VLM model via Runpod.")
+        st.info("Ask a question about the PDF in the chat interface to see analysis results here.")
     else:
         st.info("Please upload a PDF document using the sidebar to analyze it.")
 
