@@ -6,10 +6,25 @@ import tempfile
 import traceback
 import os
 import shutil
+import re
 from typing import Dict, Any, List, Tuple
 from PIL import Image
 import PyPDF2
 import pdf2image
+
+# Try to import NLTK for better sentence tokenization
+try:
+    import nltk
+    nltk.download('punkt', quiet=True)
+    from nltk.tokenize import sent_tokenize
+    SENTENCE_TOKENIZER = sent_tokenize
+    print("Using NLTK sentence tokenizer.")
+except ImportError:
+    def regex_sentence_tokenizer(text):
+        sentences = re.split(r'(?<!\w\.\w.)(?<![A-Z][a-z]\.)(?<=\.|\?|\!)\s', text)
+        return [s.strip() for s in sentences if s.strip()]
+    SENTENCE_TOKENIZER = regex_sentence_tokenizer
+    print("NLTK not found. Using regex sentence tokenizer.")
 
 # Import ColPali model components
 from colpali_engine.models import ColPali, ColPaliProcessor
@@ -93,7 +108,7 @@ def pdf_to_images_and_text(pdf_bytes: bytes) -> Tuple[List[Image.Image], List[st
     return images, texts
 
 def process_pdf_with_colpali(pdf_bytes: bytes, query: str) -> Dict[str, Any]:
-    """Process PDF using ColPali model."""
+    """Process PDF using ColPali model with enhanced snippet extraction."""
     if not colpali_model or not colpali_processor:
         return {"error": "ColPali model not available on worker."}
 
@@ -108,14 +123,29 @@ def process_pdf_with_colpali(pdf_bytes: bytes, query: str) -> Dict[str, Any]:
         with torch.no_grad():
             image_embeddings = colpali_model(**batch_images)
         
+        # Get embedding dimensions based on actual shape
+        embedding_dim = 0
+        tokens_per_page = 0
+        if isinstance(image_embeddings, torch.Tensor):
+            # Check the actual shape structure of ColPali output
+            if len(image_embeddings.shape) == 3:  # (batch, num_tokens, dim)
+                embedding_dim = image_embeddings.shape[2]
+                tokens_per_page = image_embeddings.shape[1]
+            elif len(image_embeddings.shape) == 2:  # (batch, dim)
+                embedding_dim = image_embeddings.shape[1]
+        
         # Process query if provided
         query_scores = {}
+        query_text_embedding = None
         if query:
+            # Get query embedding for image similarity
             batch_query = colpali_processor.process_queries([query]).to(colpali_model.device)
             with torch.no_grad():
                 query_embedding = colpali_model(**batch_query)
+                # Store this for text-level similarity later
+                query_text_embedding = query_embedding
             
-            # Calculate similarity scores
+            # Calculate page-level similarity scores
             scores = colpali_processor.score_multi_vector(query_embedding, image_embeddings)
             query_scores = {
                 "query": query,
@@ -123,7 +153,7 @@ def process_pdf_with_colpali(pdf_bytes: bytes, query: str) -> Dict[str, Any]:
             }
         
         # Find relevant sections based on scores
-        relevant_sections = []
+        refined_relevant_sections = []
         if query and len(pdf_texts) > 0:
             # Sort pages by score
             page_scores = query_scores["page_scores"]
@@ -136,48 +166,151 @@ def process_pdf_with_colpali(pdf_bytes: bytes, query: str) -> Dict[str, Any]:
             # Take top 3 most relevant pages
             top_pages = scored_pages[:min(3, len(scored_pages))]
             
-            # Extract relevant snippets
+            # Use global sentence tokenizer
+            sentence_tokenizer = SENTENCE_TOKENIZER
+            
+            # Process each top page for better snippet extraction
             for page_idx, score, text in top_pages:
-                # Split text into paragraphs
-                paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
-                
-                # Filter short fragments
-                filtered_paragraphs = []
-                for para in paragraphs:
-                    if len(para) > 30:  # Avoid tiny fragments
-                        filtered_paragraphs.append(para)
-                
-                relevant_sections.append({
-                    "page_number": page_idx + 1,
-                    "similarity_score": round(float(score), 4),
-                    "content": text,
-                    "snippets": filtered_paragraphs[:3]  # Take up to 3 paragraphs
-                })
+                # Skip empty pages
+                if not text.strip():
+                    continue
+                    
+                # Split text into sentences for more granular analysis
+                try:
+                    # Normalize newlines first to better handle paragraphs
+                    normalized_text = re.sub(r'\n+', '\n', text)
+                    paragraphs = [p.strip() for p in normalized_text.split('\n') if p.strip()]
+                    
+                    # Extract sentences from each paragraph
+                    sentences = []
+                    for para in paragraphs:
+                        para_sentences = sentence_tokenizer(para)
+                        sentences.extend(para_sentences)
+                    
+                    # Filter out too short sentences
+                    sentences = [s for s in sentences if len(s) > 15]
+                    
+                    # If no sentences were found, fall back to paragraphs
+                    if not sentences:
+                        if len(paragraphs) > 0:
+                            refined_relevant_sections.append({
+                                "page_number": page_idx + 1,
+                                "similarity_score": round(float(score), 4),
+                                "content": text,
+                                "snippets": paragraphs[:3]  # Original fallback behavior
+                            })
+                        continue
+                    
+                    # Verify we have the query embedding already
+                    if query_text_embedding is None:
+                        batch_query = colpali_processor.process_queries([query]).to(colpali_model.device)
+                        with torch.no_grad():
+                            query_text_embedding = colpali_model(**batch_query)
+                    
+                    # Process sentences in batches to avoid OOM
+                    batch_size = 16
+                    all_sentence_scores = []
+                    
+                    for i in range(0, len(sentences), batch_size):
+                        batch_sentences = sentences[i:i+batch_size]
+                        batch_sentences_processed = colpali_processor.process_queries(batch_sentences).to(colpali_model.device)
+                        
+                        with torch.no_grad():
+                            sentence_embeddings = colpali_model(**batch_sentences_processed)
+                        
+                        # Calculate similarity scores between query and sentences
+                        batch_similarities = colpali_processor.score_multi_vector(
+                            query_text_embedding, 
+                            sentence_embeddings
+                        )[0]
+                        
+                        # Store scores with sentence indices
+                        for j, sim in enumerate(batch_similarities):
+                            all_sentence_scores.append((i+j, float(sim)))
+                    
+                    # Sort sentences by similarity score (descending)
+                    sorted_sentence_scores = sorted(all_sentence_scores, key=lambda x: x[1], reverse=True)
+                    
+                    # Take top 5 sentences (or fewer if there aren't that many)
+                    top_k = min(5, len(sorted_sentence_scores))
+                    top_sentence_indices = [idx for idx, _ in sorted_sentence_scores[:top_k]]
+                    
+                    # Sort indices to maintain original text flow
+                    top_sentence_indices.sort()
+                    
+                    # Group adjacent sentences for context
+                    grouped_snippets = []
+                    current_group = []
+                    prev_idx = -2  # Start with a non-adjacent value
+                    
+                    for idx in top_sentence_indices:
+                        if idx == prev_idx + 1:  # Adjacent to previous sentence
+                            current_group.append(sentences[idx])
+                        else:
+                            if current_group:  # Save previous group if exists
+                                grouped_snippets.append(" ".join(current_group))
+                            current_group = [sentences[idx]]  # Start new group
+                        prev_idx = idx
+                    
+                    # Don't forget the last group
+                    if current_group:
+                        grouped_snippets.append(" ".join(current_group))
+                    
+                    # Ensure we have context for single-sentence snippets
+                    enhanced_snippets = []
+                    for snippet_idx in top_sentence_indices:
+                        # If this snippet isn't already part of a group with context
+                        if len(sentences[snippet_idx].split()) > 3:  # Only for substantive sentences
+                            context = []
+                            # Add preceding sentence if available and not already in a top snippet
+                            if snippet_idx > 0 and snippet_idx-1 not in top_sentence_indices:
+                                context.append(sentences[snippet_idx-1])
+                            
+                            # Add the main sentence
+                            context.append(sentences[snippet_idx])
+                            
+                            # Add following sentence if available and not already in a top snippet
+                            if snippet_idx < len(sentences)-1 and snippet_idx+1 not in top_sentence_indices:
+                                context.append(sentences[snippet_idx+1])
+                                
+                            enhanced_snippets.append(" ".join(context))
+                    
+                    # Combine grouped snippets with enhanced snippets, avoiding duplicates
+                    all_snippets = grouped_snippets + [s for s in enhanced_snippets if s not in grouped_snippets]
+                    
+                    # Take up to 3 best snippets
+                    final_snippets = all_snippets[:3]
+                    
+                    # Add to refined sections
+                    refined_relevant_sections.append({
+                        "page_number": page_idx + 1,
+                        "similarity_score": round(float(score), 4),
+                        "content": text,
+                        "snippets": final_snippets
+                    })
+                    
+                except Exception as snippet_error:
+                    print(f"Error processing snippets for page {page_idx+1}: {snippet_error}")
+                    print(traceback.format_exc())
+                    
+                    # Fallback to standard paragraph extraction
+                    paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
+                    refined_relevant_sections.append({
+                        "page_number": page_idx + 1,
+                        "similarity_score": round(float(score), 4),
+                        "content": text,
+                        "snippets": paragraphs[:3]  # Original fallback behavior
+                    })
         
-        # Determine embedding dimensions and tokens per page safely
-        embedding_dim = 0
-        tokens_per_page = 0
-        if isinstance(image_embeddings, torch.Tensor):
-            shape = image_embeddings.shape
-            if len(shape) > 1:
-                embedding_dim = shape[1]
-            if len(shape) > 2:
-                 # Assuming shape is (batch_size, num_tokens, embedding_dim)
-                 # Or potentially (batch_size, embedding_dim, num_tokens) - adjust if needed based on model output spec
-                tokens_per_page = shape[2] # If shape is (batch, tokens, dim)
-                # If shape is (batch, dim, tokens), use shape[1] for dim and shape[2] for tokens
-                # embedding_dim = shape[1] # Already set above assuming (batch, dim, ...) or (batch, tokens, dim) structure
-                # tokens_per_page = shape[2]
-
         # Return the results
         return {
             "status": "success",
             "num_pages": len(pdf_images),
             "page_text": pdf_texts,
-            "embedding_dimensions": embedding_dim, # Corrected
-            "tokens_per_page": tokens_per_page,   # Corrected & made safer
+            "embedding_dimensions": embedding_dim,
+            "tokens_per_page": tokens_per_page,
             "query_scores": query_scores,
-            "relevant_sections": relevant_sections,
+            "relevant_sections": refined_relevant_sections,
             "total_pages": len(pdf_images)
         }
         
@@ -189,7 +322,7 @@ def process_pdf_with_colpali(pdf_bytes: bytes, query: str) -> Dict[str, Any]:
 
 def handler(job):
     """
-    Runpod Serverless handler function.
+    RunPod Serverless handler function.
     Expects job['input'] to be a dict like:
     {
         "pdf_base64": "BASE64_ENCODED_PDF_STRING",
@@ -215,5 +348,5 @@ def handler(job):
     # Return the result
     return analysis_result
 
-# Start the Runpod serverless worker
+# Start the RunPod serverless worker
 runpod.serverless.start({"handler": handler})
