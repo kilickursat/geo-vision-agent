@@ -858,6 +858,7 @@ Constraints:
                     logger.info(f"Sending synthesis prompt to manager_agent for PDF query")
                     
                     # Process the output from the manager agent
+                    # In the PDF analysis section of process_request function
                     try:
                         # Capture the complete raw output from the agent
                         raw_output = ""
@@ -869,14 +870,27 @@ Constraints:
                         
                         logger.info(f"Raw output received from agent, length: {len(raw_output)}")
                         
-                        # Enhanced pattern matching to extract the final answer
-                        import re
-                        
-                        # Strategy 1: Look for "final_answer(" pattern - this is the expected format
-                        final_answer_func_match = re.search(r"final_answer\s*\(\s*(?:f?[\"'])(.*?)(?:[\"'])\s*\)", raw_output, re.DOTALL)
-                        if final_answer_func_match:
-                            final_response = final_answer_func_match.group(1).strip()
-                            logger.info(f"Extracted final answer using 'final_answer()' pattern: {final_response[:50]}...")
+                        # First, check for a direct "Out - Final answer:" pattern which appears in your logs
+                        if "Out - Final answer:" in raw_output:
+                            parts = raw_output.split("Out - Final answer:", 1)
+                            if len(parts) > 1:
+                                final_response = parts[1].strip()
+                                # Remove anything after [Step if present
+                                if "[Step" in final_response:
+                                    final_response = final_response.split("[Step", 1)[0].strip()
+                                logger.info(f"Extracted answer using direct split method: {final_response[:50]}...")
+                        else:
+                            # Original pattern matching attempts if the direct split method fails
+                            import re
+                            
+                            # Strategy 1: Look for "final_answer(" pattern
+                            final_answer_func_match = re.search(r"final_answer\s*\(\s*(?:f?[\"'])(.*?)(?:[\"'])\s*\)", raw_output, re.DOTALL)
+                            if final_answer_func_match:
+                                final_response = final_answer_func_match.group(1).strip()
+                                logger.info(f"Extracted final answer using 'final_answer()' pattern: {final_response[:50]}...")
+                            else:
+                                # Various fallback approaches as in your original code...
+                                # (include other pattern matching strategies)
                         # Strategy 2: Look for "Out - Final answer:" pattern as fallback
                         elif "Out - Final answer:" in raw_output:
                             # Enhanced pattern that's more flexible in how it matches
