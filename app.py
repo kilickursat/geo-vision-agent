@@ -770,6 +770,15 @@ def process_request(user_input: str):
     Returns:
         A synthesized response from the appropriate agent(s)
     """
+    # Check if agents are initialized
+    if manager_agent is None or web_agent is None or geotech_agent is None:
+        logger.error("Agents are not initialized. Cannot process request.")
+        return (
+            "I'm unable to process your request at this time because the AI agents could not be initialized. "
+            "This is likely due to missing API keys in the configuration. "
+            "Please make sure you've added a Hugging Face API key to your secrets.toml file or as an environment variable."
+        )
+        
     try:
         # First check if this is a domain-specific term we should handle directly
         if user_input.lower().strip() in ["what is ucs", "ucs", "ucs definition"]:
@@ -1203,6 +1212,7 @@ with st.sidebar:
     if st.sidebar.button("Reset Chat and Analysis"):
         # Reset all relevant session state variables
         st.session_state.chat_history = []
+        st.session_state.current_analysis = None
         st.session_state.pdf_analysis = None
         st.session_state.pdf_page_images = []
         st.session_state.current_pdf_hash = None
