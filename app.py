@@ -848,7 +848,7 @@ Constraints:
                     st.session_state.processing_status = "Synthesizing answer..."
                     logger.info(f"Sending synthesis prompt to manager_agent for PDF query")
                     
-                    # Replace this section in your process_request function
+                    # Process the output from the manager agent
                     try:
                         # Capture the complete raw output from the agent
                         raw_output = ""
@@ -860,48 +860,112 @@ Constraints:
                         
                         logger.info(f"Raw output received from agent, length: {len(raw_output)}")
                         
-                        # Extract the final answer directly from the console output
+                        # Enhanced pattern matching to extract the final answer
                         import re
                         
-                        # Look specifically for the "Out - Final answer:" pattern followed by any text
-                        final_answer_match = re.search(r"Out - Final answer:(.*?)(?:\[Step|\Z)", raw_output, re.DOTALL)
-                        
-                        if final_answer_match:
-                            final_response = final_answer_match.group(1).strip()
-                            logger.info(f"Extracted final answer using primary pattern match: {final_response[:50]}...")
-                        else:
-                            # Fall back to checking each line for the exact pattern
-                            final_response = None
-                            for line in raw_output.split('\n'):
-                                if line.startswith("Out - Final answer:"):
-                                    final_response = line.replace("Out - Final answer:", "").strip()
-                                    logger.info(f"Extracted final answer from line-by-line search: {final_response[:50]}...")
-                                    break
-                            
-                            # If still no match, try other patterns
-                            if not final_response:
-                                # Try to find tbm_definition or other variable assignment in the code
-                                variable_match = re.search(r'(\w+)_definition\s*=\s*\(\s*"([^"]+)', raw_output)
-                                if variable_match:
-                                    # Extract the first part of the definition
-                                    topic = variable_match.group(1)  # e.g., "tbm"
-                                    definition = variable_match.group(2)  # e.g., "TBM refers to Tunnel Boring Machine..."
-                                    final_response = definition
-                                    logger.info(f"Extracted definition from code: {final_response[:50]}...")
+                        # Strategy 1: Look for "final_answer(" pattern - this is the expected format
+                        final_answer_func_match = re.search(r"final_answer\s*\(\s*(?:f?[\"'])(.*?)(?:[\"'])\s*\)", raw_output, re.DOTALL)
+                        if final_answer_func_match:
+                            final_response = final_answer_func_match.group(1).strip()
+                            logger.info(f"Extracted final answer using 'final_answer()' pattern: {final_response[:50]}...")
+                        # Strategy 2: Look for "Out - Final answer:" pattern as fallback
+                        elif "Out - Final answer:" in raw_output:
+                            final_answer_match = re.search(r"Out - Final answer:\s*(.*?)(?:\[Step|\Z)", raw_output, re.DOTALL)
+                            if final_answer_match:
+                                final_response = final_answer_match.group(1).strip()
+                                logger.info(f"Extracted final answer using 'Out - Final answer:' pattern: {final_response[:50]}...")
+                            else:
+                                # Line-by-line search for "Out - Final answer:"
+                                for line in raw_output.split('\n'):
+                                    if line.startswith("Out - Final answer:"):
+                                        final_response = line.replace("Out - Final answer:", "").strip()
+                                        logger.info(f"Extracted final answer from line-by-line search: {final_response[:50]}...")
+                                        break
                                 else:
-                                    final_response = "I analyzed the PDF but couldn't extract a clear answer from the results."
+                                    final_response = None
+                        else:
+                            final_response = None
+                            
+                        # If no match found, try to extract variable assignments
+                        if not final_response:
+                            # Try to extract from variable assignments like answer = "..."
+                            var_pattern = r'(?:answer|response|summary|result|output)\s*=\s*(?:f?[\'"])(.*?)(?:[\'"](?:\s*\+\s*(?:f?[\'"])(.*?)(?:[\'"]))*)'
+                            var_match = re.search(var_pattern, raw_output, re.DOTALL)
+                            if var_match:
+                                final_response = var_match.group(1).strip()
+                                # If there are multiple groups (string concatenation), try to capture those too
+                                if var_match.lastindex and var_match.lastindex > 1:
+                                    for i in range(2, var_match.lastindex + 1):
+                                        if var_match.group(i):
+                                            final_response += var_match.group(i).strip()
+                                logger.info(f"Extracted answer from variable assignment: {final_response[:50]}...")
+                            else:
+                                # Try to find multi-line string definitions
+                                multiline_match = re.search(r'(?:answer|response|summary|result|output)\s*=\s*\(\s*[\'"]([^\'"]*)[\'"](?:\s*\+\s*[\'"]([^\'"]*)[\'"])*\s*\)', raw_output, re.DOTALL)
+                                if multiline_match:
+                                    final_response = multiline_match.group(1).strip()
+                                    # If there are multiple groups (string concatenation), try to capture those too
+                                    if multiline_match.lastindex and multiline_match.lastindex > 1:
+                                        for i in range(2, multiline_match.lastindex + 1):
+                                            if multiline_match.group(i):
+                                                final_response += multiline_match.group(i).strip()
+                                    logger.info(f"Extracted answer from multi-line string: {final_response[:50]}...")
+                                else:
+                                    # Try to extract any substantial text in quotes not in code blocks
+                                    content_match = re.search(r'[\'\"]((?:\S+\s+){10,})[\'\" ]', raw_output, re.DOTALL)
+                                    if content_match:
+                                        final_response = content_match.group(1).strip()
+                                        logger.info(f"Extracted substantial quoted content: {final_response[:50]}...")
+                                    else:
+                                        # Extract largest non-code text block as last resort
+                                        lines = raw_output.split('\n')
+                                        # Filter out code lines and find substantial text
+                                        text_lines = []
+                                        in_code_block = False
+                                        for line in lines:
+                                            if line.strip().startswith("```"):
+                                                in_code_block = not in_code_block
+                                                continue
+                                            if not in_code_block and len(line.strip()) > 30 and not line.strip().startswith(('#', 'def ', 'import ', 'from ', '>')):
+                                                text_lines.append(line.strip())
+                                        
+                                        if text_lines:
+                                            # Join the most substantial contiguous text lines
+                                            temp_blocks = []
+                                            current_block = []
+                                            for line in text_lines:
+                                                if line:
+                                                    current_block.append(line)
+                                                elif current_block:
+                                                    temp_blocks.append(" ".join(current_block))
+                                                    current_block = []
+                                            
+                                            if current_block:
+                                                temp_blocks.append(" ".join(current_block))
+                                            
+                                            # Sort blocks by length and get the longest meaningful text
+                                            if temp_blocks:
+                                                temp_blocks.sort(key=len, reverse=True)
+                                                final_response = temp_blocks[0]
+                                                logger.info(f"Extracted largest coherent text block: {final_response[:50]}...")
+                                            else:
+                                                final_response = "Based on the PDF content, I couldn't formulate a specific answer to your question. Please try asking in a different way or provide more context."
+                                        else:
+                                            final_response = "I analyzed the PDF but couldn't extract information specific to your query. Try asking about a different aspect of the document or rephrase your question."
                         
                         # Log the extracted response
-                        logger.info(f"Final response length: {len(final_response)}")
-                        logger.info(f"First 100 chars of response: {final_response[:100]}...")
+                        logger.info(f"Final response length: {len(final_response) if final_response else 0}")
+                        if final_response:
+                            logger.info(f"First 100 chars of response: {final_response[:100]}...")
+                            
                     except Exception as e:
                         logger.error(f"Error during answer synthesis: {str(e)}\n{traceback.format_exc()}")
-                        final_response = "I found relevant information in the PDF but encountered an error when formulating the answer."
+                        final_response = "I found relevant information in the PDF but encountered an error when formulating the answer. Please try again with a more specific question."
                     
                     st.session_state.processing_status = None
                 else:
                     logger.warning("No substantial snippets found in PDF analysis")
-                    final_response = "I analyzed the PDF but couldn't find information specifically relevant to your query."
+                    final_response = "I analyzed the PDF but couldn't find information specifically relevant to your query. Try asking about a different topic covered in the document."
             elif pdf_analysis_result and pdf_analysis_result.get("error"):
                 error_message = pdf_analysis_result.get("error")
                 logger.error(f"PDF analysis error: {error_message}")
@@ -987,29 +1051,65 @@ Constraints:
         
         logger.info(f"Raw output received from agent for general query, length: {len(raw_output)}")
         
-        # Extract the final answer using regex pattern matching
+        # Extract the final answer using improved pattern matching
         import re
         
-        # Try to find the specific output pattern
-        final_answer_match = re.search(r"Out - Final answer:\s*(.*?)(?:\[Step|\Z)", raw_output, re.DOTALL)
-        if final_answer_match:
-            final_response = final_answer_match.group(1).strip()
-            logger.info(f"Extracted final answer using primary pattern match")
-        else:
-            # Try alternative patterns
-            alt_match = re.search(r"Final answer:\s*(.*?)(?:\[|\Z)", raw_output, re.DOTALL)
-            if alt_match:
-                final_response = alt_match.group(1).strip()
-                logger.info(f"Extracted final answer using alternative pattern match")
+        # Strategy 1: Look for "final_answer(" pattern - this is the expected format
+        final_answer_func_match = re.search(r"final_answer\s*\(\s*(?:f?[\"'])(.*?)(?:[\"'])\s*\)", raw_output, re.DOTALL)
+        if final_answer_func_match:
+            final_response = final_answer_func_match.group(1).strip()
+            logger.info(f"Extracted final answer using 'final_answer()' pattern")
+        # Strategy 2: Look for "Out - Final answer:" pattern as fallback
+        elif "Out - Final answer:" in raw_output:
+            final_answer_match = re.search(r"Out - Final answer:\s*(.*?)(?:\[Step|\Z)", raw_output, re.DOTALL)
+            if final_answer_match:
+                final_response = final_answer_match.group(1).strip()
+                logger.info(f"Extracted final answer using 'Out - Final answer:' pattern")
             else:
-                # Use any substantial content as a fallback
-                paragraphs = re.split(r'\n\s*\n', raw_output)
-                substantial_paragraphs = [p for p in paragraphs if len(p.strip()) > 100]
-                if substantial_paragraphs:
-                    final_response = substantial_paragraphs[0].strip()
-                    logger.info(f"Using substantial paragraph as fallback for general query")
+                # Line-by-line search for "Out - Final answer:"
+                for line in raw_output.split('\n'):
+                    if line.startswith("Out - Final answer:"):
+                        final_response = line.replace("Out - Final answer:", "").strip()
+                        logger.info(f"Extracted final answer from line-by-line search")
+                        break
                 else:
-                    final_response = "I couldn't find relevant information to answer your question."
+                    final_response = None
+        else:
+            final_response = None
+            
+        # If no match found, try to extract variable assignments
+        if not final_response:
+            # Try to extract from variable assignments like answer = "..."
+            var_pattern = r'(?:answer|response|result|output)\s*=\s*(?:f?[\'"])(.*?)(?:[\'"](?:\s*\+\s*(?:f?[\'"])(.*?)(?:[\'"]))*)'
+            var_match = re.search(var_pattern, raw_output, re.DOTALL)
+            if var_match:
+                final_response = var_match.group(1).strip()
+                # If there are multiple groups (string concatenation), try to capture those too
+                if var_match.lastindex and var_match.lastindex > 1:
+                    for i in range(2, var_match.lastindex + 1):
+                        if var_match.group(i):
+                            final_response += var_match.group(i).strip()
+                logger.info(f"Extracted answer from variable assignment")
+            else:
+                # Try to find multi-line string definitions
+                multiline_match = re.search(r'(?:answer|response|result|output)\s*=\s*\(\s*[\'"]([^\'"]*)[\'"](?:\s*\+\s*[\'"]([^\'"]*)[\'"])*\s*\)', raw_output, re.DOTALL)
+                if multiline_match:
+                    final_response = multiline_match.group(1).strip()
+                    # If there are multiple groups (string concatenation), try to capture those too
+                    if multiline_match.lastindex and multiline_match.lastindex > 1:
+                        for i in range(2, multiline_match.lastindex + 1):
+                            if multiline_match.group(i):
+                                final_response += multiline_match.group(i).strip()
+                    logger.info(f"Extracted answer from multi-line string")
+                else:
+                    # Use any substantial content as a fallback
+                    paragraphs = re.split(r'\n\s*\n', raw_output)
+                    substantial_paragraphs = [p for p in paragraphs if len(p.strip()) > 100]
+                    if substantial_paragraphs:
+                        final_response = substantial_paragraphs[0].strip()
+                        logger.info(f"Using substantial paragraph as fallback for general query")
+                    else:
+                        final_response = "I couldn't find relevant information to answer your question."
         
         st.session_state.processing_status = None
         logger.info(f"FINAL RESPONSE for general query: '{final_response[:100]}...' (Type: {type(final_response)})")
