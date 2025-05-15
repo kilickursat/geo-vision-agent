@@ -870,17 +870,19 @@ Constraints:
                             logger.info(f"Extracted final answer using 'final_answer()' pattern: {final_response[:50]}...")
                         # Strategy 2: Look for "Out - Final answer:" pattern as fallback
                         elif "Out - Final answer:" in raw_output:
-                            final_answer_match = re.search(r"Out - Final answer:\s*(.*?)(?:\[Step|\Z)", raw_output, re.DOTALL)
+                            # Enhanced pattern that's more flexible in how it matches
+                            final_answer_match = re.search(r"Out - Final answer:(.*?)(?=\[|\Z)", raw_output, re.DOTALL)
                             if final_answer_match:
                                 final_response = final_answer_match.group(1).strip()
                                 logger.info(f"Extracted final answer using 'Out - Final answer:' pattern: {final_response[:50]}...")
                             else:
-                                # Line-by-line search for "Out - Final answer:"
-                                for line in raw_output.split('\n'):
-                                    if line.startswith("Out - Final answer:"):
-                                        final_response = line.replace("Out - Final answer:", "").strip()
-                                        logger.info(f"Extracted final answer from line-by-line search: {final_response[:50]}...")
-                                        break
+                                # Simpler fallback approach - get everything after the marker
+                                parts = raw_output.split("Out - Final answer:")
+                                if len(parts) > 1:
+                                    # Get the text after the marker, but before any potential "[Step" marker
+                                    after_marker = parts[1].split("[Step")[0].strip()
+                                    final_response = after_marker
+                                    logger.info(f"Extracted answer using split method: {final_response[:50]}...")
                                 else:
                                     final_response = None
                         else:
@@ -1061,17 +1063,19 @@ Constraints:
             logger.info(f"Extracted final answer using 'final_answer()' pattern")
         # Strategy 2: Look for "Out - Final answer:" pattern as fallback
         elif "Out - Final answer:" in raw_output:
-            final_answer_match = re.search(r"Out - Final answer:\s*(.*?)(?:\[Step|\Z)", raw_output, re.DOTALL)
+            # Enhanced pattern that's more flexible in how it matches
+            final_answer_match = re.search(r"Out - Final answer:(.*?)(?=\[|\Z)", raw_output, re.DOTALL)
             if final_answer_match:
                 final_response = final_answer_match.group(1).strip()
                 logger.info(f"Extracted final answer using 'Out - Final answer:' pattern")
             else:
-                # Line-by-line search for "Out - Final answer:"
-                for line in raw_output.split('\n'):
-                    if line.startswith("Out - Final answer:"):
-                        final_response = line.replace("Out - Final answer:", "").strip()
-                        logger.info(f"Extracted final answer from line-by-line search")
-                        break
+                # Simpler fallback approach - get everything after the marker
+                parts = raw_output.split("Out - Final answer:")
+                if len(parts) > 1:
+                    # Get the text after the marker, but before any potential "[Step" marker
+                    after_marker = parts[1].split("[Step")[0].strip()
+                    final_response = after_marker
+                    logger.info(f"Extracted answer using split method")
                 else:
                     final_response = None
         else:
@@ -1118,7 +1122,7 @@ Constraints:
     except Exception as e:
         logger.error(f"Error in process_request: {str(e)}\n{traceback.format_exc()}")
         return f"I encountered an unexpected error when processing your request. Please try again or rephrase your query."
-        
+
 # Initialize agent
 web_agent, geotech_agent, manager_agent = initialize_agents()
 
