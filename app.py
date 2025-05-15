@@ -773,38 +773,125 @@ def process_request(user_input: str):
         if user_input.lower().strip() in ["what is ucs", "ucs", "ucs definition"]:
             return """UCS (Uniaxial Compressive Strength) is a fundamental geotechnical parameter measuring a rock sample's maximum compressive strength when subjected to axial stress without lateral constraints. Expressed in MPa, it's a critical input for rock mass classification, tunnel design, and excavation stability analysis."""
         
-        final_response = "I couldn't find relevant information to answer your question."
-        
-        # PDF-related query processing
+        # Check if this is a PDF-related query
         if st.session_state.get("uploaded_pdf"):
-            st.session_state.processing_status = "Analyzing PDF for your query..."
-            
-            # Get PDF analysis results using the enhanced ColPali implementation
-            pdf_analysis_result = find_relevant_pdf_sections(
-                pdf_bytes=st.session_state.uploaded_pdf,
-                query=user_input
-            )
-            
-            # Clear the processing status
-            st.session_state.processing_status = None
-            
-            # Process the PDF analysis results
-            if pdf_analysis_result and not pdf_analysis_result.get("error"):
-                # Extract all snippets from the relevant sections
-                extracted_snippets = []
-                for section in pdf_analysis_result.get("relevant_sections", []):
-                    for snippet in section.get("snippets", []):
-                        # Ensure each snippet is properly formatted and substantial
-                        if snippet and len(snippet.strip()) > 20:
-                            extracted_snippets.append(snippet.strip())
+            # Special handling for summary requests
+            if any(term in user_input.lower() for term in ["summary", "summarize", "summarise", "overview", "brief"]):
+                logger.info("Processing PDF summary request")
+                st.session_state.processing_status = "Analyzing PDF for summary..."
                 
-                # If we have meaningful snippets, synthesize an answer
-                if extracted_snippets:
-                    # Format snippets as a numbered list for the synthesis prompt
-                    snippet_context = "\n".join([f"{i+1}. \"{s}\"" for i, s in enumerate(extracted_snippets)])
+                # Get PDF analysis results for a summary-focused query
+                pdf_analysis_result = find_relevant_pdf_sections(
+                    pdf_bytes=st.session_state.uploaded_pdf,
+                    query="Provide a comprehensive summary of the document content"
+                )
+                
+                # Process the PDF analysis results
+                if pdf_analysis_result and not pdf_analysis_result.get("error"):
+                    # Extract all snippets from the relevant sections
+                    extracted_snippets = []
+                    for section in pdf_analysis_result.get("relevant_sections", []):
+                        for snippet in section.get("snippets", []):
+                            # Ensure each snippet is properly formatted and substantial
+                            if snippet and len(snippet.strip()) > 20:
+                                extracted_snippets.append(snippet.strip())
                     
-                    # Create a comprehensive synthesis prompt for the manager_agent
-                    synthesis_prompt = f"""Based only on the following relevant information extracted from the PDF document, please answer the user's query.
+                    # If we have meaningful snippets, synthesize a summary
+                    if extracted_snippets:
+                        # Format snippets for the synthesis prompt
+                        snippet_context = "\n".join([f"{i+1}. \"{s}\"" for i, s in enumerate(extracted_snippets)])
+                        
+                        # Create a comprehensive synthesis prompt for the manager_agent
+                        synthesis_prompt = f"""Based only on the following relevant information extracted from the PDF document, please provide a comprehensive summary of the document.
+
+Extracted Information:
+{snippet_context}
+
+Create a well-structured summary that captures the key points, methods, results, and conclusions from the document. Format the response as a coherent paragraph that directly answers the user's request for a summary. Do not reference the snippets or mention that you're creating a summary.
+"""
+                        
+                        st.session_state.processing_status = "Synthesizing summary..."
+                        logger.info("Sending summary synthesis prompt to manager_agent")
+                        
+                        try:
+                            # Use manager_agent to generate the synthesized response
+                            manager_result = list(manager_agent.run(synthesis_prompt))
+                            
+                            # Extract the final response content
+                            final_response = ""
+                            if manager_result:
+                                if hasattr(manager_result[-1], 'content'):
+                                    final_response = manager_result[-1].content
+                                else:
+                                    final_response = str(manager_result[-1])
+                                
+                                logger.info(f"Received summary response of length: {len(final_response)}")
+                            else:
+                                final_response = "I analyzed the PDF but couldn't synthesize a complete summary."
+                                logger.warning("No response received from manager_agent for summary")
+                        except Exception as e:
+                            logger.error(f"Error during summary synthesis: {str(e)}\n{traceback.format_exc()}")
+                            final_response = "I found relevant information in the PDF but encountered an error when formulating the summary."
+                        
+                        # Store the detailed PDF analysis for the PDF tab
+                        st.session_state.pdf_analysis = pdf_analysis_result
+                        
+                        # Cache PDF page images for efficient display in the PDF tab
+                        if "pdf_page_images" not in st.session_state or st.session_state.get("current_pdf_hash") != hash(str(st.session_state.get("uploaded_pdf"))):
+                            with st.spinner("Preparing PDF page previews..."):
+                                try:
+                                    images, _ = pdf_to_images_and_text(st.session_state.uploaded_pdf)
+                                    st.session_state.pdf_page_images = images
+                                    st.session_state.current_pdf_hash = hash(str(st.session_state.uploaded_pdf))
+                                except Exception as img_error:
+                                    logger.error(f"Error preparing PDF previews: {str(img_error)}")
+                                    st.session_state.pdf_page_images = []
+                        
+                        st.session_state.processing_status = None
+                        return final_response
+                    else:
+                        logger.warning("No substantial snippets found for summary generation")
+                        return "I analyzed the PDF but couldn't find enough meaningful content to generate a summary."
+                        
+                elif pdf_analysis_result and pdf_analysis_result.get("error"):
+                    error_message = pdf_analysis_result.get("error")
+                    logger.error(f"PDF analysis error: {error_message}")
+                    return f"I encountered an issue analyzing the PDF: {error_message}"
+                else:
+                    logger.error("Empty or invalid PDF analysis result")
+                    return "I couldn't properly analyze the PDF document. Please try again."
+                    
+            # Handle other PDF-related queries (non-summary)
+            else:
+                logger.info(f"Processing specific PDF query: {user_input}")
+                st.session_state.processing_status = "Analyzing PDF for your query..."
+                
+                # Get PDF analysis results using the enhanced ColPali implementation
+                pdf_analysis_result = find_relevant_pdf_sections(
+                    pdf_bytes=st.session_state.uploaded_pdf,
+                    query=user_input
+                )
+                
+                # Clear the processing status
+                st.session_state.processing_status = None
+                
+                # Process the PDF analysis results
+                if pdf_analysis_result and not pdf_analysis_result.get("error"):
+                    # Extract all snippets from the relevant sections
+                    extracted_snippets = []
+                    for section in pdf_analysis_result.get("relevant_sections", []):
+                        for snippet in section.get("snippets", []):
+                            # Ensure each snippet is properly formatted and substantial
+                            if snippet and len(snippet.strip()) > 20:
+                                extracted_snippets.append(snippet.strip())
+                    
+                    # If we have meaningful snippets, synthesize an answer
+                    if extracted_snippets:
+                        # Format snippets as a numbered list for the synthesis prompt
+                        snippet_context = "\n".join([f"{i+1}. \"{s}\"" for i, s in enumerate(extracted_snippets)])
+                        
+                        # Create a comprehensive synthesis prompt for the manager_agent
+                        synthesis_prompt = f"""Based only on the following relevant information extracted from the PDF document, please answer the user's query.
 
 User Query: "{user_input}"
 
@@ -813,88 +900,98 @@ Extracted Information:
 
 Please provide a direct and comprehensive answer to the user's query using only the extracted information. Structure your response as a natural language answer that directly addresses the question without referring to "snippets," "extracts," or "pages." If the provided information is insufficient to answer the query, please state that clearly.
 """
-                    
-                    st.session_state.processing_status = "Synthesizing answer..."
-                    
-                    try:
-                        # Use manager_agent (Qwen) to generate the synthesized response
-                        manager_result = list(manager_agent.run(synthesis_prompt))
                         
-                        # Extract the final response content
-                        if manager_result:
-                            if hasattr(manager_result[-1], 'content'):
-                                final_response = manager_result[-1].content
-                            else:
-                                final_response = str(manager_result[-1])
-                        else:
-                            final_response = "I found relevant information in the PDF but couldn't synthesize a complete answer."
-                    except Exception as e:
-                        logger.error(f"Error during answer synthesis: {str(e)}\n{traceback.format_exc()}")
-                        final_response = "I found relevant information in the PDF but encountered an error when formulating the answer."
-                    
-                    st.session_state.processing_status = None
-                else:
-                    final_response = "I analyzed the PDF but couldn't find information specifically relevant to your query."
-                
-                # Store the detailed PDF analysis for the PDF tab
-                st.session_state.pdf_analysis = pdf_analysis_result
-                
-                # Cache PDF page images for efficient display in the PDF tab
-                if "pdf_page_images" not in st.session_state or st.session_state.get("current_pdf_hash") != hash(str(st.session_state.get("uploaded_pdf"))):
-                    with st.spinner("Preparing PDF page previews..."):
+                        st.session_state.processing_status = "Synthesizing answer..."
+                        logger.info("Sending query synthesis prompt to manager_agent")
+                        
                         try:
-                            images, _ = pdf_to_images_and_text(st.session_state.uploaded_pdf)
-                            st.session_state.pdf_page_images = images
-                            st.session_state.current_pdf_hash = hash(str(st.session_state.uploaded_pdf))
-                        except Exception as img_error:
-                            logger.error(f"Error preparing PDF previews: {str(img_error)}")
-                            st.session_state.pdf_page_images = []
-                
-            elif pdf_analysis_result and pdf_analysis_result.get("error"):
-                error_message = pdf_analysis_result.get("error")
-                logger.error(f"PDF analysis error: {error_message}")
-                final_response = f"I encountered an issue when analyzing the PDF: {error_message}"
-            else:
-                final_response = "I couldn't properly analyze the PDF document. Please try again or with a different query."
+                            # Use manager_agent to generate the synthesized response
+                            manager_result = list(manager_agent.run(synthesis_prompt))
+                            
+                            # Extract the final response content
+                            if manager_result:
+                                if hasattr(manager_result[-1], 'content'):
+                                    final_response = manager_result[-1].content
+                                else:
+                                    final_response = str(manager_result[-1])
+                                
+                                logger.info(f"Received query response of length: {len(final_response)}")
+                            else:
+                                final_response = "I found relevant information in the PDF but couldn't synthesize a complete answer."
+                                logger.warning("No response received from manager_agent for query")
+                        except Exception as e:
+                            logger.error(f"Error during answer synthesis: {str(e)}\n{traceback.format_exc()}")
+                            final_response = "I found relevant information in the PDF but encountered an error when formulating the answer."
+                        
+                        st.session_state.processing_status = None
+                    else:
+                        logger.warning("No substantial snippets found for query")
+                        final_response = "I analyzed the PDF but couldn't find information specifically relevant to your query."
+                    
+                    # Store the detailed PDF analysis for the PDF tab
+                    st.session_state.pdf_analysis = pdf_analysis_result
+                    
+                    # Cache PDF page images for efficient display in the PDF tab
+                    if "pdf_page_images" not in st.session_state or st.session_state.get("current_pdf_hash") != hash(str(st.session_state.get("uploaded_pdf"))):
+                        with st.spinner("Preparing PDF page previews..."):
+                            try:
+                                images, _ = pdf_to_images_and_text(st.session_state.uploaded_pdf)
+                                st.session_state.pdf_page_images = images
+                                st.session_state.current_pdf_hash = hash(str(st.session_state.uploaded_pdf))
+                            except Exception as img_error:
+                                logger.error(f"Error preparing PDF previews: {str(img_error)}")
+                                st.session_state.pdf_page_images = []
+                    
+                    return final_response
+                    
+                elif pdf_analysis_result and pdf_analysis_result.get("error"):
+                    error_message = pdf_analysis_result.get("error")
+                    logger.error(f"PDF analysis error: {error_message}")
+                    return f"I encountered an issue when analyzing the PDF: {error_message}"
+                else:
+                    logger.error("Empty or invalid PDF analysis result")
+                    return "I couldn't properly analyze the PDF document. Please try again or with a different query."
         
         # Non-PDF query handling through the multi-agent system
-        else:
-            st.session_state.processing_status = "Processing your request..."
-            
-            # Get web search results if appropriate for the query
-            web_output = list(web_agent(user_input))
-            web_result_str = ""
-            if web_output:
-                if hasattr(web_output[-1], 'content'):
-                    web_result_str = web_output[-1].content
+        logger.info(f"Processing general query: {user_input}")
+        st.session_state.processing_status = "Processing your request..."
+        
+        # Get web search results if appropriate for the query
+        web_output = list(web_agent(user_input))
+        web_result_str = ""
+        if web_output:
+            if hasattr(web_output[-1], 'content'):
+                web_result_str = web_output[-1].content
+            else:
+                web_result_str = str(web_output[-1])
+            logger.info("Retrieved web search results")
+        
+        # Determine if this query is suitable for geotechnical calculations
+        is_calculation_query = any(term in user_input.lower() for term in [
+            "calculate", "computation", "analysis", "soil", "rock", "tunnel", 
+            "pressure", "support", "stability", "tbm", "boring", "classification"
+        ])
+        
+        geotech_result_str = ""
+        if is_calculation_query:
+            logger.info("Query identified as calculation-related, using geotech_agent")
+            # Perform technical analysis with the geotechnical agent
+            geotech_output = list(geotech_agent(user_input))
+            if geotech_output:
+                if hasattr(geotech_output[-1], 'content'):
+                    geotech_result_str = geotech_output[-1].content
                 else:
-                    web_result_str = str(web_output[-1])
-            
-            # Determine if this query is suitable for geotechnical calculations
-            # First, check if it's a calculation-related query
-            is_calculation_query = any(term in user_input.lower() for term in [
-                "calculate", "computation", "analysis", "soil", "rock", "tunnel", 
-                "pressure", "support", "stability", "tbm", "boring", "classification"
-            ])
-            
-            geotech_result_str = ""
-            if is_calculation_query:
-                # Perform technical analysis with the geotechnical agent
-                geotech_output = list(geotech_agent(user_input))
-                if geotech_output:
-                    if hasattr(geotech_output[-1], 'content'):
-                        geotech_result_str = geotech_output[-1].content
-                    else:
-                        geotech_result_str = str(geotech_output[-1])
-            
-            # Prepare context for the manager agent
-            agent_context = {
-                "web_data": web_result_str if web_result_str else "No relevant web search information found.",
-                "technical_analysis": geotech_result_str if geotech_result_str else "No specific technical analysis performed."
-            }
-            
-            # Use manager agent to synthesize the final response
-            manager_prompt = f"""
+                    geotech_result_str = str(geotech_output[-1])
+                logger.info("Retrieved geotechnical analysis results")
+        
+        # Prepare context for the manager agent
+        agent_context = {
+            "web_data": web_result_str if web_result_str else "No relevant web search information found.",
+            "technical_analysis": geotech_result_str if geotech_result_str else "No specific technical analysis performed."
+        }
+        
+        # Use manager agent to synthesize the final response
+        manager_prompt = f"""
 User Query: {user_input}
 
 Please synthesize a comprehensive response based on the following information:
@@ -903,18 +1000,20 @@ Please synthesize a comprehensive response based on the following information:
 
 Provide a clear, concise answer that addresses the user's query directly. If the information is insufficient, acknowledge that and suggest what other information might be helpful.
 """
-            
-            # Get the final response from the manager agent
-            manager_result = list(manager_agent.run(manager_prompt))
-            
-            if manager_result:
-                if hasattr(manager_result[-1], 'content'):
-                    final_response = manager_result[-1].content
-                else:
-                    final_response = str(manager_result[-1])
-            
-            st.session_state.processing_status = None
         
+        logger.info("Sending synthesis prompt to manager_agent for general query")
+        # Get the final response from the manager agent
+        manager_result = list(manager_agent.run(manager_prompt))
+        
+        final_response = "I couldn't find relevant information to answer your question."
+        if manager_result:
+            if hasattr(manager_result[-1], 'content'):
+                final_response = manager_result[-1].content
+            else:
+                final_response = str(manager_result[-1])
+            logger.info(f"Received general response of length: {len(final_response)}")
+        
+        st.session_state.processing_status = None
         return final_response
         
     except Exception as e:
