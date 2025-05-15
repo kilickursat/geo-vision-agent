@@ -848,6 +848,7 @@ Constraints:
                     st.session_state.processing_status = "Synthesizing answer..."
                     logger.info(f"Sending synthesis prompt to manager_agent for PDF query")
                     
+                    # Replace this section in your process_request function
                     try:
                         # Capture the complete raw output from the agent
                         raw_output = ""
@@ -859,42 +860,36 @@ Constraints:
                         
                         logger.info(f"Raw output received from agent, length: {len(raw_output)}")
                         
-                        # Extract the final answer using regex pattern matching
+                        # Extract the final answer directly from the console output
                         import re
                         
-                        # Try to find the specific output pattern with 'Out - Final answer:'
-                        final_answer_match = re.search(r"Out - Final answer:\s*(.*?)(?:\[Step|\Z)", raw_output, re.DOTALL)
+                        # Look specifically for the "Out - Final answer:" pattern followed by any text
+                        final_answer_match = re.search(r"Out - Final answer:(.*?)(?:\[Step|\Z)", raw_output, re.DOTALL)
+                        
                         if final_answer_match:
                             final_response = final_answer_match.group(1).strip()
-                            logger.info(f"Extracted final answer using primary pattern match")
+                            logger.info(f"Extracted final answer using primary pattern match: {final_response[:50]}...")
                         else:
-                            # Try alternative patterns
-                            alt_match = re.search(r"Final answer:\s*(.*?)(?:\[|\Z)", raw_output, re.DOTALL)
-                            if alt_match:
-                                final_response = alt_match.group(1).strip()
-                                logger.info(f"Extracted final answer using alternative pattern match")
-                            else:
-                                # Try to find any direct content about the query topic
-                                topic_keywords = [term for term in user_input.lower().split() if len(term) > 3]
-                                if topic_keywords:
-                                    # Try to find a paragraph that contains the keywords
-                                    paragraphs = re.split(r'\n\s*\n', raw_output)
-                                    for paragraph in paragraphs:
-                                        paragraph = paragraph.strip()
-                                        if any(keyword in paragraph.lower() for keyword in topic_keywords) and len(paragraph) > 50:
-                                            final_response = paragraph
-                                            logger.info(f"Extracted content using keyword matching")
-                                            break
-                                    else:
-                                        # If no matching paragraph found, use any substantial paragraph
-                                        substantial_paragraphs = [p for p in paragraphs if len(p.strip()) > 100]
-                                        if substantial_paragraphs:
-                                            final_response = substantial_paragraphs[0].strip()
-                                            logger.info(f"Using substantial paragraph as fallback")
-                                        else:
-                                            final_response = "I analyzed the PDF but couldn't extract a clear answer from the results."
+                            # Fall back to checking each line for the exact pattern
+                            final_response = None
+                            for line in raw_output.split('\n'):
+                                if line.startswith("Out - Final answer:"):
+                                    final_response = line.replace("Out - Final answer:", "").strip()
+                                    logger.info(f"Extracted final answer from line-by-line search: {final_response[:50]}...")
+                                    break
+                            
+                            # If still no match, try other patterns
+                            if not final_response:
+                                # Try to find tbm_definition or other variable assignment in the code
+                                variable_match = re.search(r'(\w+)_definition\s*=\s*\(\s*"([^"]+)', raw_output)
+                                if variable_match:
+                                    # Extract the first part of the definition
+                                    topic = variable_match.group(1)  # e.g., "tbm"
+                                    definition = variable_match.group(2)  # e.g., "TBM refers to Tunnel Boring Machine..."
+                                    final_response = definition
+                                    logger.info(f"Extracted definition from code: {final_response[:50]}...")
                                 else:
-                                    final_response = "I analyzed the PDF but couldn't extract a clear answer related to your query."
+                                    final_response = "I analyzed the PDF but couldn't extract a clear answer from the results."
                         
                         # Log the extracted response
                         logger.info(f"Final response length: {len(final_response)}")
