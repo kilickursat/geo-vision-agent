@@ -676,9 +676,11 @@ def display_chat_message(msg):
     """Display a chat message in the Streamlit interface."""
     try:
         with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
+            # Use st.write instead of st.markdown as it handles more types of content
+            st.write(msg["content"])
     except Exception as e:
         logger.error(f"Error displaying message: {str(e)}")
+        st.error(f"Failed to display message: {str(e)}")
 
 def initialize_agents():
     """Initialize the multi-agent system with Qwen2.5-Coder-32B-Instruct model."""
@@ -778,7 +780,7 @@ def process_request(user_input: str):
             logger.info(f"Processing PDF query: {user_input}")
             st.session_state.processing_status = "Analyzing PDF for your query..."
             
-            # Use the user's actual query to find relevant sections
+            # Get PDF analysis results using the ColPali implementation
             pdf_analysis_result = find_relevant_pdf_sections(
                 pdf_bytes=st.session_state.uploaded_pdf,
                 query=user_input
@@ -816,7 +818,6 @@ def process_request(user_input: str):
                     snippet_context = "\n".join([f"{i+1}. \"{s}\"" for i, s in enumerate(extracted_snippets)])
                     
                     # Create a comprehensive synthesis prompt for the CodeAgent
-                    # Explicitly instruct it to use final_answer()
                     synthesis_prompt = f"""
 User Query: "{user_input}"
 
@@ -848,41 +849,56 @@ Constraints:
                     logger.info(f"Sending synthesis prompt to manager_agent for PDF query")
                     
                     try:
-                        # Use manager_agent to generate the synthesized response
-                        manager_messages = list(manager_agent.run(synthesis_prompt))
-                        
-                        # Default response in case processing fails
-                        final_response = "I analyzed the PDF but couldn't synthesize a clear answer."
-                        
-                        # Extract the final response content from the agent output
-                        if manager_messages:
-                            last_message = manager_messages[-1]
-                            logger.info(f"Manager agent last message type: {type(last_message)}")
-                            
-                            if hasattr(last_message, 'content'):
-                                content_str = str(last_message.content)
-                                # Look for prefixes that might be added by the agent output
-                                prefixes_to_strip = ["Out - Final answer: ", "Final Answer: ", "Output: "]
-                                processed_content = content_str.strip()
-                                
-                                for prefix in prefixes_to_strip:
-                                    if processed_content.startswith(prefix):
-                                        processed_content = processed_content[len(prefix):].strip()
-                                        logger.info(f"Stripped prefix: {prefix}")
-                                        break
-                                
-                                if processed_content:
-                                    final_response = processed_content
-                                else:
-                                    final_response = content_str.strip()
+                        # Capture the complete raw output from the agent
+                        raw_output = ""
+                        for message in manager_agent.run(synthesis_prompt):
+                            if hasattr(message, 'content'):
+                                raw_output += str(message.content) + "\n"
                             else:
-                                # If no content attribute, convert the whole message to string
-                                final_response = str(last_message)
-                            
-                            logger.info(f"Final response length: {len(final_response)}")
-                            logger.info(f"First 100 chars of response: {final_response[:100]}...")
+                                raw_output += str(message) + "\n"
+                        
+                        logger.info(f"Raw output received from agent, length: {len(raw_output)}")
+                        
+                        # Extract the final answer using regex pattern matching
+                        import re
+                        
+                        # Try to find the specific output pattern with 'Out - Final answer:'
+                        final_answer_match = re.search(r"Out - Final answer:\s*(.*?)(?:\[Step|\Z)", raw_output, re.DOTALL)
+                        if final_answer_match:
+                            final_response = final_answer_match.group(1).strip()
+                            logger.info(f"Extracted final answer using primary pattern match")
                         else:
-                            logger.warning("No messages returned from manager_agent")
+                            # Try alternative patterns
+                            alt_match = re.search(r"Final answer:\s*(.*?)(?:\[|\Z)", raw_output, re.DOTALL)
+                            if alt_match:
+                                final_response = alt_match.group(1).strip()
+                                logger.info(f"Extracted final answer using alternative pattern match")
+                            else:
+                                # Try to find any direct content about the query topic
+                                topic_keywords = [term for term in user_input.lower().split() if len(term) > 3]
+                                if topic_keywords:
+                                    # Try to find a paragraph that contains the keywords
+                                    paragraphs = re.split(r'\n\s*\n', raw_output)
+                                    for paragraph in paragraphs:
+                                        paragraph = paragraph.strip()
+                                        if any(keyword in paragraph.lower() for keyword in topic_keywords) and len(paragraph) > 50:
+                                            final_response = paragraph
+                                            logger.info(f"Extracted content using keyword matching")
+                                            break
+                                    else:
+                                        # If no matching paragraph found, use any substantial paragraph
+                                        substantial_paragraphs = [p for p in paragraphs if len(p.strip()) > 100]
+                                        if substantial_paragraphs:
+                                            final_response = substantial_paragraphs[0].strip()
+                                            logger.info(f"Using substantial paragraph as fallback")
+                                        else:
+                                            final_response = "I analyzed the PDF but couldn't extract a clear answer from the results."
+                                else:
+                                    final_response = "I analyzed the PDF but couldn't extract a clear answer related to your query."
+                        
+                        # Log the extracted response
+                        logger.info(f"Final response length: {len(final_response)}")
+                        logger.info(f"First 100 chars of response: {final_response[:100]}...")
                     except Exception as e:
                         logger.error(f"Error during answer synthesis: {str(e)}\n{traceback.format_exc()}")
                         final_response = "I found relevant information in the PDF but encountered an error when formulating the answer."
@@ -965,39 +981,49 @@ Constraints:
 """
         
         logger.info("Sending synthesis prompt to manager_agent for general query")
-        # Get the final response from the manager agent
-        manager_result = list(manager_agent.run(manager_prompt))
         
-        final_response = "I couldn't find relevant information to answer your question."
-        if manager_result:
-            last_message = manager_result[-1]
-            if hasattr(last_message, 'content'):
-                content_str = str(last_message.content)
-                # Look for prefixes that might be added by the agent output
-                prefixes_to_strip = ["Out - Final answer: ", "Final Answer: ", "Output: "]
-                processed_content = content_str.strip()
-                
-                for prefix in prefixes_to_strip:
-                    if processed_content.startswith(prefix):
-                        processed_content = processed_content[len(prefix):].strip()
-                        break
-                
-                if processed_content:
-                    final_response = processed_content
-                else:
-                    final_response = content_str.strip()
+        # Capture the complete raw output from the agent
+        raw_output = ""
+        for message in manager_agent.run(manager_prompt):
+            if hasattr(message, 'content'):
+                raw_output += str(message.content) + "\n"
             else:
-                final_response = str(last_message)
-            
-            logger.info(f"Final response for general query, length: {len(final_response)}")
+                raw_output += str(message) + "\n"
+        
+        logger.info(f"Raw output received from agent for general query, length: {len(raw_output)}")
+        
+        # Extract the final answer using regex pattern matching
+        import re
+        
+        # Try to find the specific output pattern
+        final_answer_match = re.search(r"Out - Final answer:\s*(.*?)(?:\[Step|\Z)", raw_output, re.DOTALL)
+        if final_answer_match:
+            final_response = final_answer_match.group(1).strip()
+            logger.info(f"Extracted final answer using primary pattern match")
+        else:
+            # Try alternative patterns
+            alt_match = re.search(r"Final answer:\s*(.*?)(?:\[|\Z)", raw_output, re.DOTALL)
+            if alt_match:
+                final_response = alt_match.group(1).strip()
+                logger.info(f"Extracted final answer using alternative pattern match")
+            else:
+                # Use any substantial content as a fallback
+                paragraphs = re.split(r'\n\s*\n', raw_output)
+                substantial_paragraphs = [p for p in paragraphs if len(p.strip()) > 100]
+                if substantial_paragraphs:
+                    final_response = substantial_paragraphs[0].strip()
+                    logger.info(f"Using substantial paragraph as fallback for general query")
+                else:
+                    final_response = "I couldn't find relevant information to answer your question."
         
         st.session_state.processing_status = None
-        logger.info(f"FINAL RESPONSE being returned from process_request: '{final_response[:100]}...' (Type: {type(final_response)})")
+        logger.info(f"FINAL RESPONSE for general query: '{final_response[:100]}...' (Type: {type(final_response)})")
         return final_response
         
     except Exception as e:
         logger.error(f"Error in process_request: {str(e)}\n{traceback.format_exc()}")
         return f"I encountered an unexpected error when processing your request. Please try again or rephrase your query."
+        
 # Initialize agent
 web_agent, geotech_agent, manager_agent = initialize_agents()
 
@@ -1071,7 +1097,19 @@ with st.sidebar:
                     st.session_state.analysis_params["abrasivity"],
                     st.session_state.analysis_params["diameter"]
                 )
-
+    st.markdown("---")
+    debug_mode = st.sidebar.checkbox("Enable Debug Mode", False)
+    
+    # Add reset button
+    if st.sidebar.button("Reset Chat and Analysis"):
+        # Reset all relevant session state variables
+        st.session_state.chat_history = []
+        st.session_state.pdf_analysis = None
+        st.session_state.pdf_page_images = []
+        st.session_state.current_pdf_hash = None
+        st.session_state.processing_status = None
+        st.rerun()  # Refresh the app
+        
     # PDF Analysis section in sidebar
     st.title("📄 PDF Analysis")
     
@@ -1111,6 +1149,7 @@ if st.session_state.processing_status:
 # Tabs for different functionalities
 chat_tab, analysis_tab, pdf_tab = st.tabs(["Chat", "Analysis Results", "PDF Analysis"])
 
+
 with chat_tab:
     st.subheader("💬 Chat Interface")
     
@@ -1131,6 +1170,16 @@ with chat_tab:
             message_placeholder = st.empty()
             with st.spinner(st.session_state.get("processing_status", "Processing...")):
                 response = process_request(user_prompt)
+            
+            # Add debug information if debug mode is enabled
+            if debug_mode:
+                with st.expander("Debug Information"):
+                    st.write("Raw Response Information")
+                    st.text(f"Response Type: {type(response)}")
+                    st.text(f"Response Length: {len(response)}")
+                    st.text(f"First 100 characters: {response[:100]}")
+            
+            # Display the response
             message_placeholder.markdown(response)
             
             # Add assistant response to chat history
