@@ -705,7 +705,53 @@ def initialize_agents():
             """)
             return None, None, None
 
-        login(hf_key)
+        # Implement retry logic for Hugging Face login to handle rate limiting
+        max_retries = 3
+        retry_delay = 2  # Initial delay in seconds
+        success = False
+        
+        for attempt in range(max_retries):
+            try:
+                login(hf_key)
+                success = True
+                break
+            except requests.exceptions.HTTPError as http_err:
+                # Check if it's a rate limiting error
+                if "429" in str(http_err):
+                    if attempt < max_retries - 1:  # Don't sleep on the last attempt
+                        logger.warning(f"Rate limit hit. Retrying in {retry_delay} seconds (attempt {attempt+1}/{max_retries})...")
+                        time.sleep(retry_delay)
+                        retry_delay *= 2  # Exponential backoff
+                    else:
+                        logger.error(f"Failed to authenticate after {max_retries} attempts: Rate limit exceeded")
+                        st.error(f"""
+                            **Hugging Face API rate limit exceeded.**
+                            The service is currently experiencing high demand. Please try again in a few minutes.
+                        """)
+                else:
+                    # Other HTTP error (like invalid token)
+                    logger.error(f"Hugging Face API authentication error: {str(http_err)}")
+                    st.error(f"""
+                        **Hugging Face API authentication failed.**
+                        Please check that your API key is correct and has the proper permissions.
+                        
+                        Error details: {str(http_err)}
+                    """)
+                    break
+            except Exception as e:
+                logger.error(f"Unexpected error during Hugging Face authentication: {str(e)}")
+                st.error(f"""
+                    **Error connecting to Hugging Face.**
+                    An unexpected error occurred while authenticating with the Hugging Face API.
+                    
+                    Error details: {str(e)}
+                """)
+                break
+        
+        if not success:
+            return None, None, None
+            
+        # Continue with model initialization if authentication was successful
         model = HfApiModel("Qwen/Qwen2.5-Coder-32B-Instruct")
         
         # Check if Runpod configuration is available
@@ -758,7 +804,7 @@ def initialize_agents():
         logger.error(f"Failed to initialize agents: {str(e)}\n{traceback.format_exc()}")
         st.error(f"Failed to initialize agents: {str(e)}")
         return None, None, None
-
+        
 def process_request(user_input: str):
     """
     Process user requests through the multi-agent system, handling both general queries
