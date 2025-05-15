@@ -954,7 +954,7 @@ with pdf_tab:
                             try:
                                 images, _ = pdf_to_images_and_text(st.session_state.uploaded_pdf)
                                 if images and section['page_number'] <= len(images):
-                                    st.image(images[section['page_number']-1], caption=f"Page {section['page_number']}", use_column_width=True)
+                                    st.image(images[section['page_number']-1], caption=f"Page {section['page_number']}", use_container_width=True)
                                 else:
                                     st.warning(f"Preview not available for page {section['page_number']}")
                             except Exception as e:
