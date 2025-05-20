@@ -17,7 +17,7 @@ from huggingface_hub import login
 from typing import Dict, List, Any, Tuple
 from markdownify import markdownify
 from requests.exceptions import RequestException
-from smolagents import tool, CodeAgent, HfApiModel, ToolCallingAgent, DuckDuckGoSearchTool
+from smolagents import tool, CodeAgent, InferenceClientModel, ToolCallingAgent, DuckDuckGoSearchTool
 import traceback
 import sys
 import os
@@ -752,7 +752,8 @@ def initialize_agents():
             return None, None, None
             
         # Continue with model initialization if authentication was successful
-        model = HfApiModel("Qwen/Qwen2.5-Coder-32B-Instruct")
+        # Update: using InferenceClientModel instead of HfApiModel
+        model = InferenceClientModel("Qwen/Qwen2.5-Coder-32B-Instruct")
         
         # Check if Runpod configuration is available
         try:
@@ -904,7 +905,6 @@ Constraints:
                     logger.info(f"Sending synthesis prompt to manager_agent for PDF query")
                     
                     # Process the output from the manager agent
-                    # In the PDF analysis section of process_request function
                     try:
                         # Capture the complete raw output from the agent
                         raw_output = ""
@@ -916,7 +916,8 @@ Constraints:
                         
                         logger.info(f"Raw output received from agent, length: {len(raw_output)}")
                         
-                        # First, check for a direct "Out - Final answer:" pattern which appears in your logs
+                        # FIX: Improved pattern matching logic for extraction
+                        # First, check for a direct "Out - Final answer:" pattern
                         if "Out - Final answer:" in raw_output:
                             parts = raw_output.split("Out - Final answer:", 1)
                             if len(parts) > 1:
@@ -925,101 +926,38 @@ Constraints:
                                 if "[Step" in final_response:
                                     final_response = final_response.split("[Step", 1)[0].strip()
                                 logger.info(f"Extracted answer using direct split method: {final_response[:50]}...")
+                                # Critical - early return with the valid response
+                                if final_response:
+                                    st.session_state.processing_status = None
+                                    return final_response
+                        
+                        # If we get here, try the other extraction methods
+                        import re
+                        
+                        # Strategy 1: Look for "final_answer(" pattern
+                        final_answer_func_match = re.search(r"final_answer\s*\(\s*(?:f?[\"'])(.*?)(?:[\"'])\s*\)", raw_output, re.DOTALL)
+                        if final_answer_func_match:
+                            final_response = final_answer_func_match.group(1).strip()
+                            logger.info(f"Extracted final answer using 'final_answer()' pattern: {final_response[:50]}...")
+                        elif "Out - Final answer:" in raw_output:
+                            # Enhanced pattern that's more flexible in how it matches
+                            final_answer_match = re.search(r"Out - Final answer:(.*?)(?=\[|\Z)", raw_output, re.DOTALL)
+                            if final_answer_match:
+                                final_response = final_answer_match.group(1).strip()
+                                logger.info(f"Extracted final answer using 'Out - Final answer:' pattern: {final_response[:50]}...")
+                            else:
+                                # Simpler fallback approach - get everything after the marker
+                                parts = raw_output.split("Out - Final answer:")
+                                if len(parts) > 1:
+                                    # Get the text after the marker, but before any potential "[Step" marker
+                                    after_marker = parts[1].split("[Step")[0].strip()
+                                    final_response = after_marker
+                                    logger.info(f"Extracted answer using split method: {final_response[:50]}...")
+                                else:
+                                    final_response = None
                         else:
-                            # Original pattern matching attempts if the direct split method fails
-                            import re
-                            
-                            # Strategy 1: Look for "final_answer(" pattern
-                            final_answer_func_match = re.search(r"final_answer\s*\(\s*(?:f?[\"'])(.*?)(?:[\"'])\s*\)", raw_output, re.DOTALL)
-                            if final_answer_func_match:
-                                final_response = final_answer_func_match.group(1).strip()
-                                logger.info(f"Extracted final answer using 'final_answer()' pattern: {final_response[:50]}...")
-                            elif "Out - Final answer:" in raw_output:
-                                # Enhanced pattern that's more flexible in how it matches
-                                final_answer_match = re.search(r"Out - Final answer:(.*?)(?=\[|\Z)", raw_output, re.DOTALL)
-                                if final_answer_match:
-                                    final_response = final_answer_match.group(1).strip()
-                                    logger.info(f"Extracted final answer using 'Out - Final answer:' pattern: {final_response[:50]}...")
-                                else:
-                                    # Simpler fallback approach - get everything after the marker
-                                    parts = raw_output.split("Out - Final answer:")
-                                    if len(parts) > 1:
-                                        # Get the text after the marker, but before any potential "[Step" marker
-                                        after_marker = parts[1].split("[Step")[0].strip()
-                                        final_response = after_marker
-                                        logger.info(f"Extracted answer using split method: {final_response[:50]}...")
-                                    else:
-                                        final_response = None
-                            else:
-                                final_response = None
+                            final_response = None
                                 
-                        # If no match found, try to extract variable assignments
-                        if not final_response:
-                            # Try to extract from variable assignments like answer = "..."
-                            var_pattern = r'(?:answer|response|summary|result|output)\s*=\s*(?:f?[\'"])(.*?)(?:[\'"](?:\s*\+\s*(?:f?[\'"])(.*?)(?:[\'"]))*)'
-                            var_match = re.search(var_pattern, raw_output, re.DOTALL)
-                            if var_match:
-                                final_response = var_match.group(1).strip()
-                                # If there are multiple groups (string concatenation), try to capture those too
-                                if var_match.lastindex and var_match.lastindex > 1:
-                                    for i in range(2, var_match.lastindex + 1):
-                                        if var_match.group(i):
-                                            final_response += var_match.group(i).strip()
-                                logger.info(f"Extracted answer from variable assignment: {final_response[:50]}...")
-                            else:
-                                # Try to find multi-line string definitions
-                                multiline_match = re.search(r'(?:answer|response|summary|result|output)\s*=\s*\(\s*[\'"]([^\'"]*)[\'"](?:\s*\+\s*[\'"]([^\'"]*)[\'"])*\s*\)', raw_output, re.DOTALL)
-                                if multiline_match:
-                                    final_response = multiline_match.group(1).strip()
-                                    # If there are multiple groups (string concatenation), try to capture those too
-                                    if multiline_match.lastindex and multiline_match.lastindex > 1:
-                                        for i in range(2, multiline_match.lastindex + 1):
-                                            if multiline_match.group(i):
-                                                final_response += multiline_match.group(i).strip()
-                                    logger.info(f"Extracted answer from multi-line string: {final_response[:50]}...")
-                                else:
-                                    # Try to extract any substantial text in quotes not in code blocks
-                                    content_match = re.search(r'[\'\"]((?:\S+\s+){10,})[\'\" ]', raw_output, re.DOTALL)
-                                    if content_match:
-                                        final_response = content_match.group(1).strip()
-                                        logger.info(f"Extracted substantial quoted content: {final_response[:50]}...")
-                                    else:
-                                        # Extract largest non-code text block as last resort
-                                        lines = raw_output.split('\n')
-                                        # Filter out code lines and find substantial text
-                                        text_lines = []
-                                        in_code_block = False
-                                        for line in lines:
-                                            if line.strip().startswith("```"):
-                                                in_code_block = not in_code_block
-                                                continue
-                                            if not in_code_block and len(line.strip()) > 30 and not line.strip().startswith(('#', 'def ', 'import ', 'from ', '>')):
-                                                text_lines.append(line.strip())
-                                        
-                                        if text_lines:
-                                            # Join the most substantial contiguous text lines
-                                            temp_blocks = []
-                                            current_block = []
-                                            for line in text_lines:
-                                                if line:
-                                                    current_block.append(line)
-                                                elif current_block:
-                                                    temp_blocks.append(" ".join(current_block))
-                                                    current_block = []
-                                            
-                                            if current_block:
-                                                temp_blocks.append(" ".join(current_block))
-                                            
-                                            # Sort blocks by length and get the longest meaningful text
-                                            if temp_blocks:
-                                                temp_blocks.sort(key=len, reverse=True)
-                                                final_response = temp_blocks[0]
-                                                logger.info(f"Extracted largest coherent text block: {final_response[:50]}...")
-                                            else:
-                                                final_response = "Based on the PDF content, I couldn't formulate a specific answer to your question. Please try asking in a different way or provide more context."
-                                        else:
-                                            final_response = "I analyzed the PDF but couldn't extract information specific to your query. Try asking about a different aspect of the document or rephrase your question."
-                            
                         # If no match found, try to extract variable assignments
                         if not final_response:
                             # Try to extract from variable assignments like answer = "..."
@@ -1185,10 +1123,25 @@ Constraints:
         
         logger.info(f"Raw output received from agent for general query, length: {len(raw_output)}")
         
-        # Extract the final answer using improved pattern matching
+        # Extract the final answer using improved pattern matching (similar to PDF processing logic)
+        # First, check for a direct "Out - Final answer:" pattern
+        if "Out - Final answer:" in raw_output:
+            parts = raw_output.split("Out - Final answer:", 1)
+            if len(parts) > 1:
+                final_response = parts[1].strip()
+                # Remove anything after [Step if present
+                if "[Step" in final_response:
+                    final_response = final_response.split("[Step", 1)[0].strip()
+                logger.info(f"Extracted answer using direct split method: {final_response[:50]}...")
+                # Early return with valid response
+                if final_response:
+                    st.session_state.processing_status = None
+                    return final_response
+        
+        # If we get here, try the other extraction methods
         import re
         
-        # Strategy 1: Look for "final_answer(" pattern - this is the expected format
+        # Strategy 1: Look for "final_answer(" pattern
         final_answer_func_match = re.search(r"final_answer\s*\(\s*(?:f?[\"'])(.*?)(?:[\"'])\s*\)", raw_output, re.DOTALL)
         if final_answer_func_match:
             final_response = final_answer_func_match.group(1).strip()
