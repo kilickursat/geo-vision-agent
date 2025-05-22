@@ -25,16 +25,40 @@ from PIL import Image
 import PyPDF2
 import pdf2image
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("geotechnical_app.log")
-    ]
-)
-logger = logging.getLogger(__name__)
+# Enhanced logging configuration
+def setup_enhanced_logging():
+    """Setup enhanced logging for better debugging."""
+    
+    # Create formatters
+    detailed_formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s'
+    )
+    
+    # File handler for detailed logs
+    file_handler = logging.FileHandler("geotechnical_app_detailed.log")
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(detailed_formatter)
+    
+    # Console handler for immediate feedback
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(logging.Formatter('%(levelname)s - %(message)s'))
+    
+    # Configure root logger
+    logger = logging.getLogger()
+    logger.setLevel(logging.DEBUG)
+    
+    # Clear existing handlers to avoid duplicates
+    logger.handlers.clear()
+    
+    # Add handlers
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+    
+    return logger
+
+# Initialize enhanced logging
+logger = setup_enhanced_logging()
 
 # Page configuration
 st.set_page_config(
@@ -62,10 +86,63 @@ if 'pdf_page_images' not in st.session_state:
 if 'current_pdf_hash' not in st.session_state:
     st.session_state.current_pdf_hash = None
 
+# Response validation function
+def validate_response(response, context="general"):
+    """Validate and clean up response before displaying."""
+    logger.debug(f"Validating response in context '{context}': type={type(response)}, length={len(str(response)) if response else 0}")
+    
+    # Handle None responses
+    if response is None:
+        logger.warning(f"Received None response in context '{context}'")
+        return "I couldn't generate a response. Please try again with a different question."
+    
+    # Convert to string if needed
+    if not isinstance(response, str):
+        logger.info(f"Converting response from {type(response)} to string")
+        response = str(response)
+    
+    # Clean up the response
+    response = response.strip()
+    
+    # Handle empty responses
+    if not response:
+        logger.warning(f"Received empty response in context '{context}'")
+        return "I generated an empty response. Please try rephrasing your question."
+    
+    # Remove any problematic characters that might interfere with Streamlit
+    response = response.replace('\x00', '').replace('\r\n', '\n').replace('\r', '\n')
+    
+    # Limit response length to prevent UI issues
+    if len(response) > 10000:
+        logger.warning(f"Response too long ({len(response)} chars), truncating")
+        response = response[:9950] + "\n\n[Response truncated due to length]"
+    
+    logger.debug(f"Response validation complete: length={len(response)}")
+    return response
+
+# Enhanced error handling wrapper
+def safe_agent_call(agent, query, context="unknown"):
+    """Safely call an agent with comprehensive error handling."""
+    try:
+        logger.info(f"Making agent call in context '{context}': {query[:100]}...")
+        
+        # Call the agent using .run() method
+        result = agent.run(query)
+        
+        # Validate the result
+        validated_result = validate_response(result, context)
+        
+        logger.info(f"Agent call successful in context '{context}': response length={len(validated_result)}")
+        return validated_result
+        
+    except Exception as e:
+        error_msg = f"Agent call failed in context '{context}': {str(e)}"
+        logger.error(f"{error_msg}\n{traceback.format_exc()}")
+        return f"I encountered an error while processing your request: {str(e)}"
+
 # Runpod API integration functions
 def call_runpod_endpoint(pdf_bytes, query=None):
     """Call the Runpod serverless endpoint for PDF analysis."""
-    # Get Runpod endpoint URL and API key from secrets
     try:
         runpod_endpoint_url = st.secrets["runpod"]["endpoint_url"]
         runpod_api_key = st.secrets["runpod"]["api_key"]
@@ -97,7 +174,7 @@ def call_runpod_endpoint(pdf_bytes, query=None):
                 runpod_endpoint_url, 
                 json=payload, 
                 headers=headers,
-                timeout=30  # Initial request timeout
+                timeout=30
             )
             response.raise_for_status()
         
@@ -110,7 +187,7 @@ def call_runpod_endpoint(pdf_bytes, query=None):
             st.session_state.processing_status = "Processing PDF with ColPali model..."
             
             with st.spinner("Processing PDF (this may take a minute)..."):
-                max_attempts = 30  # Maximum number of polling attempts
+                max_attempts = 30
                 for attempt in range(max_attempts):
                     status_response = requests.get(status_url, headers=headers)
                     status_data = status_response.json()
@@ -122,15 +199,12 @@ def call_runpod_endpoint(pdf_bytes, query=None):
                         st.session_state.processing_status = "Analysis failed"
                         return {"error": f"Processing failed: {status_data.get('error', 'Unknown error')}"}
                     
-                    # Update progress message
                     progress_msg = f"Processing PDF (attempt {attempt+1}/{max_attempts})..."
                     st.session_state.processing_status = progress_msg
                     
-                    # Wait before polling again (exponential backoff with cap)
                     wait_time = min(2 * (1.5 ** attempt), 15)
                     time.sleep(wait_time)
                 
-                # If we've exhausted all attempts
                 st.session_state.processing_status = "Analysis timed out"
                 return {"error": "PDF analysis timed out. Please try again or with a smaller document."}
         else:
@@ -672,16 +746,6 @@ def pdf_to_images_and_text(pdf_bytes):
         logger.error(f"Error processing PDF: {e}\n{traceback.format_exc()}")
         return [], []
 
-def display_chat_message(msg):
-    """Display a chat message in the Streamlit interface."""
-    try:
-        with st.chat_message(msg["role"]):
-            # Use st.write instead of st.markdown as it handles more types of content
-            st.write(msg["content"])
-    except Exception as e:
-        logger.error(f"Error displaying message: {str(e)}")
-        st.error(f"Failed to display message: {str(e)}")
-
 def initialize_agents():
     """Initialize the multi-agent system with Qwen2.5-Coder-32B-Instruct model."""
     try:
@@ -805,17 +869,10 @@ def initialize_agents():
         logger.error(f"Failed to initialize agents: {str(e)}\n{traceback.format_exc()}")
         st.error(f"Failed to initialize agents: {str(e)}")
         return None, None, None
-        
+
 def process_request(user_input: str):
     """
-    Process user requests through the multi-agent system, handling both general queries
-    and PDF-specific analysis with intelligent synthesis.
-    
-    Args:
-        user_input: The user's question or request
-        
-    Returns:
-        A synthesized response from the appropriate agent(s)
+    FIXED VERSION: Process user requests through the multi-agent system with proper response handling
     """
     # Check if agents are initialized
     if manager_agent is None or web_agent is None or geotech_agent is None:
@@ -825,13 +882,9 @@ def process_request(user_input: str):
             "This is likely due to missing API keys in the configuration. "
             "Please make sure you've added a Hugging Face API key to your secrets.toml file or as an environment variable."
         )
-        
+    
     try:
-        # First check if this is a domain-specific term we should handle directly
-        if user_input.lower().strip() in ["what is ucs", "ucs", "ucs definition"]:
-            return """UCS (Uniaxial Compressive Strength) is a fundamental geotechnical parameter measuring a rock sample's maximum compressive strength when subjected to axial stress without lateral constraints. Expressed in MPa, it's a critical input for rock mass classification, tunnel design, and excavation stability analysis."""
-        
-        # Check if a PDF has been uploaded
+        # Handle PDF queries
         if st.session_state.get("uploaded_pdf"):
             logger.info(f"Processing PDF query: {user_input}")
             st.session_state.processing_status = "Analyzing PDF for your query..."
@@ -864,352 +917,184 @@ def process_request(user_input: str):
                 extracted_snippets = []
                 for section in pdf_analysis_result.get("relevant_sections", []):
                     for snippet in section.get("snippets", []):
-                        # Ensure each snippet is substantial
                         if snippet and len(snippet.strip()) > 20:
                             extracted_snippets.append(snippet.strip())
                 
-                # If we have meaningful snippets, synthesize an answer
+                # If we have meaningful snippets, create a direct response
                 if extracted_snippets:
-                    # Format snippets for the synthesis prompt
-                    snippet_context = "\n".join([f"{i+1}. \"{s}\"" for i, s in enumerate(extracted_snippets)])
+                    # Create a comprehensive direct response instead of using manager_agent
+                    snippet_context = "\n\n".join([f"• {s}" for s in extracted_snippets[:3]])
                     
-                    # Create a comprehensive synthesis prompt for the CodeAgent
-                    synthesis_prompt = f"""
-User Query: "{user_input}"
+                    # Direct response construction - no complex regex needed
+                    final_response = f"""Based on the PDF analysis, here's what I found regarding "{user_input}":
 
-Extracted Information from PDF:
 {snippet_context}
 
-Task:
-1. Understand the User Query.
-2. Based ONLY on the Extracted Information from PDF, formulate a direct and comprehensive natural language answer to the User Query.
-3. If the query asks for a summary, provide a well-structured summary. Otherwise, answer the specific question.
-4. Construct your final answer as a Python string.
-5. Call final_answer(your_final_answer_string) with this string.
-
-Example:
-summary = (
-    "The study focuses on classifying tunnel lithology in soft ground using "
-    "a clustering-guided Light Gradient Boosting Machine (LightGBM). "
-    "The researchers integrated K-means and SMOTE to guide the LightGBM model."
-)
-final_answer(summary)
-
-Constraints:
-- Do not refer to "snippets," "extracts," or "pages" in your answer.
-- If the provided information is insufficient, clearly state that in your answer.
-- Format the answer as a coherent paragraph that directly addresses the query.
-"""
+This information was extracted from {len(pdf_analysis_result.get("relevant_sections", []))} relevant page(s) in the document."""
                     
-                    st.session_state.processing_status = "Synthesizing answer..."
-                    logger.info(f"Sending synthesis prompt to manager_agent for PDF query")
-                    
-                    # Process the output from the manager agent
-                    try:
-                        # Capture the complete raw output from the agent
-                        raw_output = ""
-                        for message in manager_agent.run(synthesis_prompt):
-                            if hasattr(message, 'content'):
-                                raw_output += str(message.content) + "\n"
-                            else:
-                                raw_output += str(message) + "\n"
-                        
-                        logger.info(f"Raw output received from agent, length: {len(raw_output)}")
-                        
-                        # FIX: Improved pattern matching logic for extraction
-                        # First, check for a direct "Out - Final answer:" pattern
-                        if "Out - Final answer:" in raw_output:
-                            parts = raw_output.split("Out - Final answer:", 1)
-                            if len(parts) > 1:
-                                final_response = parts[1].strip()
-                                # Remove anything after [Step if present
-                                if "[Step" in final_response:
-                                    final_response = final_response.split("[Step", 1)[0].strip()
-                                logger.info(f"Extracted answer using direct split method: {final_response[:50]}...")
-                                # Critical - early return with the valid response
-                                if final_response:
-                                    st.session_state.processing_status = None
-                                    return final_response
-                        
-                        # If we get here, try the other extraction methods
-                        import re
-                        
-                        # Strategy 1: Look for "final_answer(" pattern
-                        final_answer_func_match = re.search(r"final_answer\s*\(\s*(?:f?[\"'])(.*?)(?:[\"'])\s*\)", raw_output, re.DOTALL)
-                        if final_answer_func_match:
-                            final_response = final_answer_func_match.group(1).strip()
-                            logger.info(f"Extracted final answer using 'final_answer()' pattern: {final_response[:50]}...")
-                        elif "Out - Final answer:" in raw_output:
-                            # Enhanced pattern that's more flexible in how it matches
-                            final_answer_match = re.search(r"Out - Final answer:(.*?)(?=\[|\Z)", raw_output, re.DOTALL)
-                            if final_answer_match:
-                                final_response = final_answer_match.group(1).strip()
-                                logger.info(f"Extracted final answer using 'Out - Final answer:' pattern: {final_response[:50]}...")
-                            else:
-                                # Simpler fallback approach - get everything after the marker
-                                parts = raw_output.split("Out - Final answer:")
-                                if len(parts) > 1:
-                                    # Get the text after the marker, but before any potential "[Step" marker
-                                    after_marker = parts[1].split("[Step")[0].strip()
-                                    final_response = after_marker
-                                    logger.info(f"Extracted answer using split method: {final_response[:50]}...")
-                                else:
-                                    final_response = None
-                        else:
-                            final_response = None
-                                
-                        # If no match found, try to extract variable assignments
-                        if not final_response:
-                            # Try to extract from variable assignments like answer = "..."
-                            var_pattern = r'(?:answer|response|summary|result|output)\s*=\s*(?:f?[\'"])(.*?)(?:[\'"](?:\s*\+\s*(?:f?[\'"])(.*?)(?:[\'"]))*)'
-                            var_match = re.search(var_pattern, raw_output, re.DOTALL)
-                            if var_match:
-                                final_response = var_match.group(1).strip()
-                                # If there are multiple groups (string concatenation), try to capture those too
-                                if var_match.lastindex and var_match.lastindex > 1:
-                                    for i in range(2, var_match.lastindex + 1):
-                                        if var_match.group(i):
-                                            final_response += var_match.group(i).strip()
-                                logger.info(f"Extracted answer from variable assignment: {final_response[:50]}...")
-                            else:
-                                # Try to find multi-line string definitions
-                                multiline_match = re.search(r'(?:answer|response|summary|result|output)\s*=\s*\(\s*[\'"]([^\'"]*)[\'"](?:\s*\+\s*[\'"]([^\'"]*)[\'"])*\s*\)', raw_output, re.DOTALL)
-                                if multiline_match:
-                                    final_response = multiline_match.group(1).strip()
-                                    # If there are multiple groups (string concatenation), try to capture those too
-                                    if multiline_match.lastindex and multiline_match.lastindex > 1:
-                                        for i in range(2, multiline_match.lastindex + 1):
-                                            if multiline_match.group(i):
-                                                final_response += multiline_match.group(i).strip()
-                                    logger.info(f"Extracted answer from multi-line string: {final_response[:50]}...")
-                                else:
-                                    # Try to extract any substantial text in quotes not in code blocks
-                                    content_match = re.search(r'[\'\"]((?:\S+\s+){10,})[\'\" ]', raw_output, re.DOTALL)
-                                    if content_match:
-                                        final_response = content_match.group(1).strip()
-                                        logger.info(f"Extracted substantial quoted content: {final_response[:50]}...")
-                                    else:
-                                        # Extract largest non-code text block as last resort
-                                        lines = raw_output.split('\n')
-                                        # Filter out code lines and find substantial text
-                                        text_lines = []
-                                        in_code_block = False
-                                        for line in lines:
-                                            if line.strip().startswith("```"):
-                                                in_code_block = not in_code_block
-                                                continue
-                                            if not in_code_block and len(line.strip()) > 30 and not line.strip().startswith(('#', 'def ', 'import ', 'from ', '>')):
-                                                text_lines.append(line.strip())
-                                        
-                                        if text_lines:
-                                            # Join the most substantial contiguous text lines
-                                            temp_blocks = []
-                                            current_block = []
-                                            for line in text_lines:
-                                                if line:
-                                                    current_block.append(line)
-                                                elif current_block:
-                                                    temp_blocks.append(" ".join(current_block))
-                                                    current_block = []
-                                            
-                                            if current_block:
-                                                temp_blocks.append(" ".join(current_block))
-                                            
-                                            # Sort blocks by length and get the longest meaningful text
-                                            if temp_blocks:
-                                                temp_blocks.sort(key=len, reverse=True)
-                                                final_response = temp_blocks[0]
-                                                logger.info(f"Extracted largest coherent text block: {final_response[:50]}...")
-                                            else:
-                                                final_response = "Based on the PDF content, I couldn't formulate a specific answer to your question. Please try asking in a different way or provide more context."
-                                        else:
-                                            final_response = "I analyzed the PDF but couldn't extract information specific to your query. Try asking about a different aspect of the document or rephrase your question."
-                        
-                        # Log the extracted response
-                        logger.info(f"Final response length: {len(final_response) if final_response else 0}")
-                        if final_response:
-                            logger.info(f"First 100 chars of response: {final_response[:100]}...")
-                            
-                    except Exception as e:
-                        logger.error(f"Error during answer synthesis: {str(e)}\n{traceback.format_exc()}")
-                        final_response = "I found relevant information in the PDF but encountered an error when formulating the answer. Please try again with a more specific question."
-                    
-                    st.session_state.processing_status = None
+                    logger.info(f"Direct PDF response created, length: {len(final_response)}")
+                    return validate_response(final_response, "pdf_analysis")
                 else:
-                    logger.warning("No substantial snippets found in PDF analysis")
-                    final_response = "I analyzed the PDF but couldn't find information specifically relevant to your query. Try asking about a different topic covered in the document."
+                    return validate_response("I analyzed the PDF but couldn't find information specifically relevant to your query. Try asking about a different topic covered in the document.", "pdf_no_results")
             elif pdf_analysis_result and pdf_analysis_result.get("error"):
                 error_message = pdf_analysis_result.get("error")
                 logger.error(f"PDF analysis error: {error_message}")
-                final_response = f"I encountered an issue when analyzing the PDF: {error_message}"
+                return validate_response(f"I encountered an issue when analyzing the PDF: {error_message}", "pdf_error")
             else:
-                logger.error("PDF analysis returned empty or invalid result")
-                final_response = "I couldn't properly analyze the PDF document. Please try again or with a different query."
-            
-            # Log the final response before returning
-            logger.info(f"FINAL RESPONSE being returned from process_request: '{final_response[:100]}...' (Type: {type(final_response)})")
-            return final_response
+                return validate_response("I couldn't properly analyze the PDF document. Please try again or with a different query.", "pdf_general_error")
         
-        # Non-PDF query handling through the multi-agent system
+        # Handle general queries - FIXED APPROACH
         logger.info(f"Processing general query: {user_input}")
         st.session_state.processing_status = "Processing your request..."
         
-        # Get web search results if appropriate for the query
-        web_output = list(web_agent(user_input))
-        web_result_str = ""
-        if web_output:
-            if hasattr(web_output[-1], 'content'):
-                web_result_str = web_output[-1].content
-            else:
-                web_result_str = str(web_output[-1])
-            logger.info("Retrieved web search results")
-        
-        # Determine if this query is suitable for geotechnical calculations
-        is_calculation_query = any(term in user_input.lower() for term in [
-            "calculate", "computation", "analysis", "soil", "rock", "tunnel", 
-            "pressure", "support", "stability", "tbm", "boring", "classification"
-        ])
-        
-        geotech_result_str = ""
-        if is_calculation_query:
-            logger.info("Query identified as calculation-related, using geotech_agent")
-            # Perform technical analysis with the geotechnical agent
-            geotech_output = list(geotech_agent(user_input))
-            if geotech_output:
-                if hasattr(geotech_output[-1], 'content'):
-                    geotech_result_str = geotech_output[-1].content
-                else:
-                    geotech_result_str = str(geotech_output[-1])
-                logger.info("Retrieved geotechnical analysis results")
-        
-        # Prepare context for the manager agent
-        agent_context = {
-            "web_data": web_result_str if web_result_str else "No relevant web search information found.",
-            "technical_analysis": geotech_result_str if geotech_result_str else "No specific technical analysis performed."
-        }
-        
-        # Use manager agent to synthesize the final response
-        manager_prompt = f"""
-User Query: "{user_input}"
-
-Please synthesize a comprehensive response based on the following information:
-1. Web Search Results: {agent_context['web_data']}
-2. Technical Analysis: {agent_context['technical_analysis']}
-
-Task:
-1. Understand the User Query.
-2. Based on the provided Web Search Results and Technical Analysis, formulate a direct and comprehensive answer.
-3. Construct your final answer as a Python string.
-4. Call final_answer(your_final_answer_string) with this string.
-
-Example:
-response = "Based on the search results and technical analysis, the answer to your question is..."
-final_answer(response)
-
-Constraints:
-- Provide a clear, concise answer that directly addresses the user's query.
-- If the information is insufficient, acknowledge that and suggest what other information might be helpful.
-"""
-        
-        logger.info("Sending synthesis prompt to manager_agent for general query")
-        
-        # Capture the complete raw output from the agent
-        raw_output = ""
-        for message in manager_agent.run(manager_prompt):
-            if hasattr(message, 'content'):
-                raw_output += str(message.content) + "\n"
-            else:
-                raw_output += str(message) + "\n"
-        
-        logger.info(f"Raw output received from agent for general query, length: {len(raw_output)}")
-        
-        # Extract the final answer using improved pattern matching (similar to PDF processing logic)
-        # First, check for a direct "Out - Final answer:" pattern
-        if "Out - Final answer:" in raw_output:
-            parts = raw_output.split("Out - Final answer:", 1)
-            if len(parts) > 1:
-                final_response = parts[1].strip()
-                # Remove anything after [Step if present
-                if "[Step" in final_response:
-                    final_response = final_response.split("[Step", 1)[0].strip()
-                logger.info(f"Extracted answer using direct split method: {final_response[:50]}...")
-                # Early return with valid response
-                if final_response:
-                    st.session_state.processing_status = None
-                    return final_response
-        
-        # If we get here, try the other extraction methods
-        import re
-        
-        # Strategy 1: Look for "final_answer(" pattern
-        final_answer_func_match = re.search(r"final_answer\s*\(\s*(?:f?[\"'])(.*?)(?:[\"'])\s*\)", raw_output, re.DOTALL)
-        if final_answer_func_match:
-            final_response = final_answer_func_match.group(1).strip()
-            logger.info(f"Extracted final answer using 'final_answer()' pattern")
-        # Strategy 2: Look for "Out - Final answer:" pattern as fallback
-        elif "Out - Final answer:" in raw_output:
-            # Enhanced pattern that's more flexible in how it matches
-            final_answer_match = re.search(r"Out - Final answer:(.*?)(?=\[|\Z)", raw_output, re.DOTALL)
-            if final_answer_match:
-                final_response = final_answer_match.group(1).strip()
-                logger.info(f"Extracted final answer using 'Out - Final answer:' pattern")
-            else:
-                # Simpler fallback approach - get everything after the marker
-                parts = raw_output.split("Out - Final answer:")
-                if len(parts) > 1:
-                    # Get the text after the marker, but before any potential "[Step" marker
-                    after_marker = parts[1].split("[Step")[0].strip()
-                    final_response = after_marker
-                    logger.info(f"Extracted answer using split method")
-                else:
-                    final_response = None
-        else:
-            final_response = None
+        try:
+            # FIX 1: Use agent.run() instead of calling agent directly
+            # This ensures we get the final answer, not the step-by-step generator
             
-        # If no match found, try to extract variable assignments
-        if not final_response:
-            # Try to extract from variable assignments like answer = "..."
-            var_pattern = r'(?:answer|response|result|output)\s*=\s*(?:f?[\'"])(.*?)(?:[\'"](?:\s*\+\s*(?:f?[\'"])(.*?)(?:[\'"]))*)'
-            var_match = re.search(var_pattern, raw_output, re.DOTALL)
-            if var_match:
-                final_response = var_match.group(1).strip()
-                # If there are multiple groups (string concatenation), try to capture those too
-                if var_match.lastindex and var_match.lastindex > 1:
-                    for i in range(2, var_match.lastindex + 1):
-                        if var_match.group(i):
-                            final_response += var_match.group(i).strip()
-                logger.info(f"Extracted answer from variable assignment")
+            # Get web search results if appropriate
+            web_result_str = ""
+            if any(term in user_input.lower() for term in ["search", "find", "what is", "who is", "when", "where", "how"]):
+                try:
+                    web_result = safe_agent_call(web_agent, user_input, "web_search")
+                    web_result_str = str(web_result) if web_result else ""
+                    logger.info("Retrieved web search results")
+                except Exception as e:
+                    logger.warning(f"Web search failed: {str(e)}")
+                    web_result_str = ""
+            
+            # Determine if this query needs geotechnical calculations
+            is_calculation_query = any(term in user_input.lower() for term in [
+                "calculate", "computation", "analysis", "soil", "rock", "tunnel", 
+                "pressure", "support", "stability", "tbm", "boring", "classification"
+            ])
+            
+            geotech_result_str = ""
+            if is_calculation_query:
+                try:
+                    geotech_result = safe_agent_call(geotech_agent, user_input, "geotechnical")
+                    geotech_result_str = str(geotech_result) if geotech_result else ""
+                    logger.info("Retrieved geotechnical analysis results")
+                except Exception as e:
+                    logger.warning(f"Geotechnical analysis failed: {str(e)}")
+                    geotech_result_str = ""
+            
+            # FIX 2: Simplified response synthesis
+            # If we have specific results, use them directly
+            if geotech_result_str:
+                response = geotech_result_str
+            elif web_result_str:
+                response = web_result_str
             else:
-                # Try to find multi-line string definitions
-                multiline_match = re.search(r'(?:answer|response|result|output)\s*=\s*\(\s*[\'"]([^\'"]*)[\'"](?:\s*\+\s*[\'"]([^\'"]*)[\'"])*\s*\)', raw_output, re.DOTALL)
-                if multiline_match:
-                    final_response = multiline_match.group(1).strip()
-                    # If there are multiple groups (string concatenation), try to capture those too
-                    if multiline_match.lastindex and multiline_match.lastindex > 1:
-                        for i in range(2, multiline_match.lastindex + 1):
-                            if multiline_match.group(i):
-                                final_response += multiline_match.group(i).strip()
-                    logger.info(f"Extracted answer from multi-line string")
-                else:
-                    # Use any substantial content as a fallback
-                    paragraphs = re.split(r'\n\s*\n', raw_output)
-                    substantial_paragraphs = [p for p in paragraphs if len(p.strip()) > 100]
-                    if substantial_paragraphs:
-                        final_response = substantial_paragraphs[0].strip()
-                        logger.info(f"Using substantial paragraph as fallback for general query")
-                    else:
-                        final_response = "I couldn't find relevant information to answer your question."
-        
-        st.session_state.processing_status = None
-        logger.info(f"FINAL RESPONSE for general query: '{final_response[:100]}...' (Type: {type(final_response)})")
-        return final_response
-        
+                # FIX 3: Use manager agent only as fallback with simple prompt
+                try:
+                    simple_prompt = f"Please answer this question directly: {user_input}"
+                    manager_result = safe_agent_call(manager_agent, simple_prompt, "manager_fallback")
+                    response = str(manager_result) if manager_result else "I couldn't generate a response to your query."
+                except Exception as e:
+                    logger.error(f"Manager agent failed: {str(e)}")
+                    response = "I encountered an error while processing your request. Please try rephrasing your question."
+            
+            st.session_state.processing_status = None
+            logger.info(f"Final response created, length: {len(response)}")
+            return validate_response(response, "general_query")
+            
+        except Exception as e:
+            logger.error(f"Error in agent processing: {str(e)}\n{traceback.format_exc()}")
+            st.session_state.processing_status = None
+            return validate_response(f"I encountered an error while processing your request: {str(e)}", "agent_error")
+            
     except Exception as e:
         logger.error(f"Error in process_request: {str(e)}\n{traceback.format_exc()}")
-        return f"I encountered an unexpected error when processing your request. Please try again or rephrase your query."
+        st.session_state.processing_status = None
+        return validate_response(f"I encountered an unexpected error. Please try again or rephrase your query.", "general_error")
 
-# Initialize agent
+# Initialize agents
 web_agent, geotech_agent, manager_agent = initialize_agents()
+
+# Add debugging sidebar
+def add_debug_sidebar():
+    """Add debugging information to sidebar."""
+    with st.sidebar:
+        st.markdown("---")
+        st.subheader("🔍 Debug Info")
+        
+        # Debug mode toggle
+        debug_mode = st.checkbox("Enable Debug Mode", False)
+        
+        if debug_mode:
+            # Session state info
+            with st.expander("Session State", expanded=False):
+                st.write("Chat History Length:", len(st.session_state.get('chat_history', [])))
+                st.write("Processing Status:", st.session_state.get('processing_status', 'None'))
+                st.write("Current Analysis:", st.session_state.get('current_analysis', 'None'))
+                st.write("PDF Uploaded:", bool(st.session_state.get('uploaded_pdf')))
+            
+            # Agent status
+            with st.expander("Agent Status", expanded=False):
+                st.write("Web Agent:", "✅ Initialized" if web_agent else "❌ Not initialized")
+                st.write("Geotech Agent:", "✅ Initialized" if geotech_agent else "❌ Not initialized")
+                st.write("Manager Agent:", "✅ Initialized" if manager_agent else "❌ Not initialized")
+            
+            # Recent logs
+            if st.button("Show Recent Logs"):
+                try:
+                    with open("geotechnical_app_detailed.log", "r") as f:
+                        lines = f.readlines()
+                        recent_lines = lines[-20:]  # Last 20 lines
+                        st.text_area("Recent Log Lines", "\n".join(recent_lines), height=200)
+                except Exception as e:
+                    st.error(f"Could not read log file: {str(e)}")
+        
+        # Reset button
+        if st.button("🔄 Reset Everything"):
+            # Clear all session state
+            for key in list(st.session_state.keys()):
+                del st.session_state[key]
+            st.rerun()
+
+# Test function for debugging
+def test_agent_responses():
+    """Test function to verify agent responses work correctly."""
+    st.subheader("🧪 Agent Response Test")
+    
+    if st.button("Test Web Agent"):
+        try:
+            test_query = "What is Python programming?"
+            with st.spinner("Testing web agent..."):
+                if web_agent:
+                    result = safe_agent_call(web_agent, test_query, "test_web")
+                    st.success("Web Agent Test Result:")
+                    st.write(result)
+                else:
+                    st.error("Web agent not initialized")
+        except Exception as e:
+            st.error(f"Web agent test failed: {str(e)}")
+    
+    if st.button("Test Geotech Agent"):
+        try:
+            test_query = "Calculate tunnel support for 10m depth"
+            with st.spinner("Testing geotech agent..."):
+                if geotech_agent:
+                    result = safe_agent_call(geotech_agent, test_query, "test_geotech")
+                    st.success("Geotech Agent Test Result:")
+                    st.write(result)
+                else:
+                    st.error("Geotech agent not initialized")
+        except Exception as e:
+            st.error(f"Geotech agent test failed: {str(e)}")
+    
+    if st.button("Test Manager Agent"):
+        try:
+            test_query = "What is 2 + 2?"
+            with st.spinner("Testing manager agent..."):
+                if manager_agent:
+                    result = safe_agent_call(manager_agent, test_query, "test_manager")
+                    st.success("Manager Agent Test Result:")
+                    st.write(result)
+                else:
+                    st.error("Manager agent not initialized")
+        except Exception as e:
+            st.error(f"Manager agent test failed: {str(e)}")
 
 # Sidebar
 with st.sidebar:
@@ -1249,6 +1134,7 @@ with st.sidebar:
                 "abrasivity": st.number_input("Cerchar Abrasivity Index", 0.0, 6.0, 2.0),
                 "diameter": st.number_input("TBM Diameter (m)", 1.0, 15.0, 6.0)
             }
+    
     if st.button("Run Analysis"):
         with st.spinner("Processing..."):
             if analysis_type == "Soil Classification":
@@ -1281,20 +1167,9 @@ with st.sidebar:
                     st.session_state.analysis_params["abrasivity"],
                     st.session_state.analysis_params["diameter"]
                 )
-    st.markdown("---")
-    debug_mode = st.sidebar.checkbox("Enable Debug Mode", False)
     
-    # Add reset button
-    if st.sidebar.button("Reset Chat and Analysis"):
-        # Reset all relevant session state variables
-        st.session_state.chat_history = []
-        st.session_state.current_analysis = None
-        st.session_state.pdf_analysis = None
-        st.session_state.pdf_page_images = []
-        st.session_state.current_pdf_hash = None
-        st.session_state.processing_status = None
-        st.rerun()  # Refresh the app
-        
+    st.markdown("---")
+    
     # PDF Analysis section in sidebar
     st.title("📄 PDF Analysis")
     
@@ -1323,6 +1198,9 @@ with st.sidebar:
                     )
             else:
                 st.warning("Please enter a query for analysis.")
+    
+    # Add debug sidebar
+    add_debug_sidebar()
 
 # Main content
 st.title("🏗️ Geotechnical AI Agent by Qwen2.5-Coder-32B-Instruct")
@@ -1332,43 +1210,87 @@ if st.session_state.processing_status:
     st.info(f"Status: {st.session_state.processing_status}")
 
 # Tabs for different functionalities
-chat_tab, analysis_tab, pdf_tab = st.tabs(["Chat", "Analysis Results", "PDF Analysis"])
+chat_tab, analysis_tab, pdf_tab, debug_tab = st.tabs(["Chat", "Analysis Results", "PDF Analysis", "Debug"])
 
-
+# FIXED CHAT TAB
 with chat_tab:
     st.subheader("💬 Chat Interface")
     
-    # Display previous chat messages
+    # Display previous chat messages - FIXED VERSION
     for msg in st.session_state.chat_history:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
+        try:
+            with st.chat_message(msg["role"]):
+                # Ensure content is properly handled as string
+                content = msg.get("content", "")
+                if not isinstance(content, str):
+                    content = str(content)
+                
+                # Clean and display content
+                if content.strip():
+                    st.markdown(content.strip())
+                else:
+                    st.markdown("*No content*")
+        except Exception as e:
+            logger.error(f"Error displaying chat message: {str(e)}")
+            with st.chat_message(msg["role"]):
+                st.error("Error displaying message")
     
-    # Chat input with the modern st.chat_input component
+    # Chat input - IMPROVED VERSION
     if user_prompt := st.chat_input("Ask a question or describe your task:"):
         # Add user message to chat history and display immediately
-        st.session_state.chat_history.append({"role": "user", "content": user_prompt})
+        user_msg = {"role": "user", "content": user_prompt}
+        st.session_state.chat_history.append(user_msg)
+        
+        # Display user message
         with st.chat_message("user"):
             st.markdown(user_prompt)
         
-        # Process the user's request and display assistant response
+        # Process and display assistant response
         with st.chat_message("assistant"):
             message_placeholder = st.empty()
-            with st.spinner(st.session_state.get("processing_status", "Processing...")):
-                response = process_request(user_prompt)
             
-            # Add debug information if debug mode is enabled
-            if debug_mode:
-                with st.expander("Debug Information"):
-                    st.write("Raw Response Information")
-                    st.text(f"Response Type: {type(response)}")
-                    st.text(f"Response Length: {len(response)}")
-                    st.text(f"First 100 characters: {response[:100]}")
+            try:
+                # Show processing indicator
+                with st.spinner("Processing your request..."):
+                    # CRITICAL FIX: Call the corrected process_request function
+                    response = process_request(user_prompt)
+                
+                # CRITICAL FIX: Ensure response is a clean string
+                if response is None:
+                    response = "I couldn't generate a response to your question."
+                elif not isinstance(response, str):
+                    response = str(response)
+                
+                # Clean the response
+                response = response.strip()
+                if not response:
+                    response = "I received an empty response. Please try rephrasing your question."
+                
+                # Display response immediately - no complex processing
+                message_placeholder.markdown(response)
+                
+                # Add to chat history
+                assistant_msg = {"role": "assistant", "content": response}
+                st.session_state.chat_history.append(assistant_msg)
+                
+                # Log success
+                logger.info(f"Successfully processed and displayed response (length: {len(response)})")
+                
+            except Exception as e:
+                # Handle any errors gracefully
+                error_msg = f"I encountered an error while processing your request: {str(e)}"
+                logger.error(f"Chat processing error: {str(e)}\n{traceback.format_exc()}")
+                
+                # Display error message
+                message_placeholder.error(error_msg)
+                
+                # Add error to history
+                error_assistant_msg = {"role": "assistant", "content": error_msg}
+                st.session_state.chat_history.append(error_assistant_msg)
             
-            # Display the response
-            message_placeholder.markdown(response)
-            
-            # Add assistant response to chat history
-            st.session_state.chat_history.append({"role": "assistant", "content": response})
+            finally:
+                # Clear processing status
+                st.session_state.processing_status = None
 
 with analysis_tab:
     st.subheader("📊 Analysis Results")
@@ -1448,6 +1370,9 @@ with pdf_tab:
         st.info("Ask a question about the PDF in the chat interface to see analysis results here.")
     else:
         st.info("Please upload a PDF document using the sidebar to analyze it.")
+
+with debug_tab:
+    test_agent_responses()
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("Built with ❤️ by Kilic Intelligence")
