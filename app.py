@@ -17,88 +17,13 @@ from huggingface_hub import login
 from typing import Dict, List, Any, Tuple
 from markdownify import markdownify
 from requests.exceptions import RequestException
+from smolagents import tool, CodeAgent, InferenceClientModel, ToolCallingAgent, DuckDuckGoSearchTool
 import traceback
 import sys
 import os
 from PIL import Image
 import PyPDF2
 import pdf2image
-
-# CRITICAL FIX: PyTorch/Streamlit compatibility fixes
-# Fix 1: Disable Streamlit file watcher for problematic modules
-if hasattr(st, '_config'):
-    st._config.set_option('global.disableWatchdogWarning', True)
-
-# Fix 2: Set environment variables to prevent conflicts
-os.environ['STREAMLIT_SERVER_FILE_WATCHER_TYPE'] = 'none'
-os.environ['STREAMLIT_SERVER_HEADLESS'] = 'true'
-
-# Fix 3: Import torch with compatibility patches
-try:
-    # Patch torch.classes before importing smolagents
-    import torch
-    if hasattr(torch, 'classes'):
-        # Create a dummy __path__ attribute if it doesn't exist
-        if not hasattr(torch.classes, '__path__'):
-            class DummyPath:
-                def __init__(self):
-                    self._path = []
-                
-                def __iter__(self):
-                    return iter(self._path)
-                
-                def __getattr__(self, name):
-                    if name == '_path':
-                        return []
-                    raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
-            
-            torch.classes.__path__ = DummyPath()
-    
-    logger_init = True
-except ImportError:
-    # If torch is not available, continue without it
-    logger_init = True
-except Exception as e:
-    print(f"Warning: PyTorch compatibility patch failed: {e}")
-    logger_init = True
-
-# Fix 4: Monkey patch Streamlit's asyncio handling
-import asyncio
-original_get_running_loop = asyncio.get_running_loop
-
-def patched_get_running_loop():
-    try:
-        return original_get_running_loop()
-    except RuntimeError:
-        # If no event loop is running, create a new one
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        return loop
-
-# Apply the patch
-asyncio.get_running_loop = patched_get_running_loop
-
-# Now safely import smolagents after applying patches
-try:
-    from smolagents import tool, CodeAgent, InferenceClientModel, ToolCallingAgent, DuckDuckGoSearchTool
-    smolagents_available = True
-except ImportError as e:
-    print(f"Warning: smolagents not available: {e}")
-    smolagents_available = False
-    # Create dummy classes for graceful degradation
-    class DummyAgent:
-        def __init__(self, *args, **kwargs):
-            pass
-        def run(self, query):
-            return "Agents not available - please install smolagents"
-    
-    CodeAgent = DummyAgent
-    ToolCallingAgent = DummyAgent
-    InferenceClientModel = lambda x: None
-    DuckDuckGoSearchTool = lambda: None
-    
-    def tool(func):
-        return func
 
 # Enhanced logging configuration
 def setup_enhanced_logging():
@@ -135,25 +60,13 @@ def setup_enhanced_logging():
 # Initialize enhanced logging
 logger = setup_enhanced_logging()
 
-# Page configuration with additional fixes
+# Page configuration
 st.set_page_config(
     page_title="Advanced Geotechnical AI Agent by Qwen2.5-Coder-32B-Instruct",
     page_icon="🏗️",
     layout="wide",
     initial_sidebar_state="expanded"
 )
-
-# Fix 5: Add Streamlit configuration overrides
-if 'configured' not in st.session_state:
-    # Override problematic configuration settings
-    try:
-        import streamlit.web.bootstrap as bootstrap
-        if hasattr(bootstrap, '_fix_matplotlib_crash'):
-            bootstrap._fix_matplotlib_crash()
-    except:
-        pass
-    
-    st.session_state.configured = True
 
 # Initialize session state
 if 'chat_history' not in st.session_state:
@@ -207,24 +120,14 @@ def validate_response(response, context="general"):
     logger.debug(f"Response validation complete: length={len(response)}")
     return response
 
-# Enhanced error handling wrapper with asyncio fixes
+# Enhanced error handling wrapper
 def safe_agent_call(agent, query, context="unknown"):
-    """Safely call an agent with comprehensive error handling and asyncio fixes."""
+    """Safely call an agent with comprehensive error handling."""
     try:
         logger.info(f"Making agent call in context '{context}': {query[:100]}...")
         
-        # Fix 6: Ensure we're in the right asyncio context
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        
         # Call the agent using .run() method
-        if smolagents_available and agent:
-            result = agent.run(query)
-        else:
-            result = "Agent service is not available. Please check your configuration."
+        result = agent.run(query)
         
         # Validate the result
         validated_result = validate_response(result, context)
@@ -346,15 +249,12 @@ def search_geotechnical_data(query: str) -> str:
     Returns:
         Search results as formatted text.
     """
-    if smolagents_available:
-        search_tool = DuckDuckGoSearchTool()
-        try:
-            results = search_tool(query)
-            return str(results)
-        except Exception as e:
-            return f"Search error: {str(e)}"
-    else:
-        return "Search functionality not available - smolagents not installed"
+    search_tool = DuckDuckGoSearchTool()
+    try:
+        results = search_tool(query)
+        return str(results)
+    except Exception as e:
+        return f"Search error: {str(e)}"
 
 @tool
 def classify_soil(soil_type: str, plasticity_index: float, liquid_limit: float) -> Dict:
@@ -847,15 +747,12 @@ def pdf_to_images_and_text(pdf_bytes):
         return [], []
 
 def initialize_agents():
-    """Initialize the multi-agent system with enhanced error handling and asyncio fixes."""
+    """Initialize the multi-agent system with Qwen2.5-Coder-32B-Instruct model."""
     try:
-        if not smolagents_available:
-            st.warning("⚠️ SmolaAgents not available. Some features will be limited.")
-            return None, None, None
-        
-        # Fix 7: Handle HuggingFace authentication with asyncio fixes
+        # Try to get the Hugging Face API key from secrets or environment variable
         hf_key = None
         try:
+            # Access nested secret properly
             hf_key = st.secrets["huggingface"]["HUGGINGFACE_API_KEY"]
         except Exception as e:
             logger.warning(f"Couldn't access Hugging Face secrets: {str(e)}")
@@ -872,143 +769,136 @@ def initialize_agents():
             """)
             return None, None, None
 
-        # Enhanced authentication with asyncio fixes
+        # Implement retry logic for Hugging Face login to handle rate limiting
         max_retries = 3
-        retry_delay = 2
+        retry_delay = 2  # Initial delay in seconds
         success = False
         
         for attempt in range(max_retries):
             try:
-                # Ensure we have proper asyncio context
-                try:
-                    loop = asyncio.get_running_loop()
-                except RuntimeError:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                
                 login(hf_key)
                 success = True
                 break
             except requests.exceptions.HTTPError as http_err:
+                # Check if it's a rate limiting error
                 if "429" in str(http_err):
-                    if attempt < max_retries - 1:
+                    if attempt < max_retries - 1:  # Don't sleep on the last attempt
                         logger.warning(f"Rate limit hit. Retrying in {retry_delay} seconds (attempt {attempt+1}/{max_retries})...")
                         time.sleep(retry_delay)
-                        retry_delay *= 2
+                        retry_delay *= 2  # Exponential backoff
                     else:
                         logger.error(f"Failed to authenticate after {max_retries} attempts: Rate limit exceeded")
-                        st.error("**Hugging Face API rate limit exceeded.** Please try again in a few minutes.")
+                        st.error(f"""
+                            **Hugging Face API rate limit exceeded.**
+                            The service is currently experiencing high demand. Please try again in a few minutes.
+                        """)
                 else:
+                    # Other HTTP error (like invalid token)
                     logger.error(f"Hugging Face API authentication error: {str(http_err)}")
-                    st.error(f"**Hugging Face API authentication failed.** Please check your API key.")
+                    st.error(f"""
+                        **Hugging Face API authentication failed.**
+                        Please check that your API key is correct and has the proper permissions.
+                        
+                        Error details: {str(http_err)}
+                    """)
                     break
             except Exception as e:
                 logger.error(f"Unexpected error during Hugging Face authentication: {str(e)}")
-                st.error(f"**Error connecting to Hugging Face.** {str(e)}")
+                st.error(f"""
+                    **Error connecting to Hugging Face.**
+                    An unexpected error occurred while authenticating with the Hugging Face API.
+                    
+                    Error details: {str(e)}
+                """)
                 break
         
         if not success:
             return None, None, None
             
-        # Initialize model with error handling
-        try:
-            model = InferenceClientModel("Qwen/Qwen2.5-Coder-32B-Instruct")
-        except Exception as e:
-            logger.error(f"Failed to initialize model: {str(e)}")
-            st.error(f"Failed to initialize AI model: {str(e)}")
-            return None, None, None
+        # Continue with model initialization if authentication was successful
+        # Update: using InferenceClientModel instead of HfApiModel
+        model = InferenceClientModel("Qwen/Qwen2.5-Coder-32B-Instruct")
         
-        # Check Runpod configuration
+        # Check if Runpod configuration is available
         try:
             runpod_endpoint_url = st.secrets["runpod"]["endpoint_url"]
             runpod_api_key = st.secrets["runpod"]["api_key"]
-            st.success("✅ Runpod API configuration found. PDF analysis available.")
+            st.success("Runpod API configuration found. PDF analysis will use Runpod Serverless.")
         except Exception as e:
             logger.warning(f"Runpod configuration not found: {str(e)}")
-            st.warning("⚠️ PDF analysis features will be limited without Runpod configuration.")
+            st.warning("PDF analysis features will be limited without Runpod configuration.")
         
-        # Initialize agents with error handling
-        try:
-            web_agent = ToolCallingAgent(
-                tools=[search_geotechnical_data, visit_webpage],
-                model=model,
-                max_steps=10
-            )
-            
-            geotech_agent = ToolCallingAgent(
-                tools=[
-                    classify_soil,
-                    calculate_tunnel_support,
-                    calculate_rmr,
-                    calculate_q_system,
-                    estimate_tbm_performance,
-                    analyze_face_stability,
-                    import_borehole_data,
-                    visualize_3d_results,
-                    calculate_tbm_penetration,
-                    calculate_cutter_specs,
-                    calculate_specific_energy,
-                    predict_cutter_life,
-                    extract_pdf_features,
-                    find_relevant_pdf_sections
-                ],
-                model=model,
-                max_steps=10
-            )
-            
-            manager_agent = CodeAgent(
-                tools=[search_geotechnical_data],
-                model=model,
-                additional_authorized_imports=["time", "numpy", "pandas"]
-            )
-            
-            logger.info("All agents initialized successfully")
-            st.success("✅ AI Agents initialized successfully")
-            return web_agent, geotech_agent, manager_agent
-            
-        except Exception as e:
-            logger.error(f"Failed to initialize agents: {str(e)}")
-            st.error(f"Failed to initialize agents: {str(e)}")
-            return None, None, None
+        # Web search agent
+        web_agent = ToolCallingAgent(
+            tools=[search_geotechnical_data, visit_webpage],
+            model=model,
+            max_steps=10
+        )
         
+        # Geotech calculation agent
+        geotech_agent = ToolCallingAgent(
+            tools=[
+                classify_soil,
+                calculate_tunnel_support,
+                calculate_rmr,
+                calculate_q_system,
+                estimate_tbm_performance,
+                analyze_face_stability,
+                import_borehole_data,
+                visualize_3d_results,
+                calculate_tbm_penetration,
+                calculate_cutter_specs,
+                calculate_specific_energy,
+                predict_cutter_life,
+                extract_pdf_features,
+                find_relevant_pdf_sections
+            ],
+            model=model,
+            max_steps=10
+        )
+        
+        # Manager agent
+        manager_agent = CodeAgent(
+            tools=[search_geotechnical_data],
+            model=model,
+            additional_authorized_imports=["time", "numpy", "pandas"]
+        )
+        
+        return web_agent, geotech_agent, manager_agent
     except Exception as e:
         logger.error(f"Failed to initialize agents: {str(e)}\n{traceback.format_exc()}")
         st.error(f"Failed to initialize agents: {str(e)}")
         return None, None, None
 
 def process_request(user_input: str):
-    """Process user requests with enhanced error handling and asyncio fixes."""
-    
+    """
+    FIXED VERSION: Process user requests through the multi-agent system with proper response handling
+    """
     # Check if agents are initialized
-    if not smolagents_available or manager_agent is None or web_agent is None or geotech_agent is None:
+    if manager_agent is None or web_agent is None or geotech_agent is None:
         logger.error("Agents are not initialized. Cannot process request.")
         return (
             "I'm unable to process your request at this time because the AI agents could not be initialized. "
-            "This is likely due to missing API keys or compatibility issues. "
-            "Please check your configuration and try again."
+            "This is likely due to missing API keys in the configuration. "
+            "Please make sure you've added a Hugging Face API key to your secrets.toml file or as an environment variable."
         )
     
     try:
-        # Fix 8: Ensure proper asyncio context for all operations
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        
         # Handle PDF queries
         if st.session_state.get("uploaded_pdf"):
             logger.info(f"Processing PDF query: {user_input}")
             st.session_state.processing_status = "Analyzing PDF for your query..."
             
+            # Get PDF analysis results using the ColPali implementation
             pdf_analysis_result = find_relevant_pdf_sections(
                 pdf_bytes=st.session_state.uploaded_pdf,
                 query=user_input
             )
             
+            # Store the detailed PDF analysis for the PDF tab
             st.session_state.pdf_analysis = pdf_analysis_result
             
-            # Cache PDF page images
+            # Cache PDF page images for efficient display
             if "pdf_page_images" not in st.session_state or st.session_state.get("current_pdf_hash") != hash(str(st.session_state.get("uploaded_pdf"))):
                 with st.spinner("Preparing PDF page previews..."):
                     try:
@@ -1021,17 +911,21 @@ def process_request(user_input: str):
             
             st.session_state.processing_status = None
             
-            # Process PDF results
+            # Process the PDF analysis results
             if pdf_analysis_result and not pdf_analysis_result.get("error"):
+                # Extract all snippets from the relevant sections
                 extracted_snippets = []
                 for section in pdf_analysis_result.get("relevant_sections", []):
                     for snippet in section.get("snippets", []):
                         if snippet and len(snippet.strip()) > 20:
                             extracted_snippets.append(snippet.strip())
                 
+                # If we have meaningful snippets, create a direct response
                 if extracted_snippets:
+                    # Create a comprehensive direct response instead of using manager_agent
                     snippet_context = "\n\n".join([f"• {s}" for s in extracted_snippets[:3]])
                     
+                    # Direct response construction - no complex regex needed
                     final_response = f"""Based on the PDF analysis, here's what I found regarding "{user_input}":
 
 {snippet_context}
@@ -1049,11 +943,14 @@ This information was extracted from {len(pdf_analysis_result.get("relevant_secti
             else:
                 return validate_response("I couldn't properly analyze the PDF document. Please try again or with a different query.", "pdf_general_error")
         
-        # Handle general queries with asyncio fixes
+        # Handle general queries - FIXED APPROACH
         logger.info(f"Processing general query: {user_input}")
         st.session_state.processing_status = "Processing your request..."
         
         try:
+            # FIX 1: Use agent.run() instead of calling agent directly
+            # This ensures we get the final answer, not the step-by-step generator
+            
             # Get web search results if appropriate
             web_result_str = ""
             if any(term in user_input.lower() for term in ["search", "find", "what is", "who is", "when", "where", "how"]):
@@ -1065,7 +962,7 @@ This information was extracted from {len(pdf_analysis_result.get("relevant_secti
                     logger.warning(f"Web search failed: {str(e)}")
                     web_result_str = ""
             
-            # Check for geotechnical calculations
+            # Determine if this query needs geotechnical calculations
             is_calculation_query = any(term in user_input.lower() for term in [
                 "calculate", "computation", "analysis", "soil", "rock", "tunnel", 
                 "pressure", "support", "stability", "tbm", "boring", "classification"
@@ -1081,12 +978,14 @@ This information was extracted from {len(pdf_analysis_result.get("relevant_secti
                     logger.warning(f"Geotechnical analysis failed: {str(e)}")
                     geotech_result_str = ""
             
-            # Response synthesis
+            # FIX 2: Simplified response synthesis
+            # If we have specific results, use them directly
             if geotech_result_str:
                 response = geotech_result_str
             elif web_result_str:
                 response = web_result_str
             else:
+                # FIX 3: Use manager agent only as fallback with simple prompt
                 try:
                     simple_prompt = f"Please answer this question directly: {user_input}"
                     manager_result = safe_agent_call(manager_agent, simple_prompt, "manager_fallback")
@@ -1109,7 +1008,7 @@ This information was extracted from {len(pdf_analysis_result.get("relevant_secti
         st.session_state.processing_status = None
         return validate_response(f"I encountered an unexpected error. Please try again or rephrase your query.", "general_error")
 
-# Initialize agents with all fixes applied
+# Initialize agents
 web_agent, geotech_agent, manager_agent = initialize_agents()
 
 # Add debugging sidebar
@@ -1196,34 +1095,6 @@ def test_agent_responses():
                     st.error("Manager agent not initialized")
         except Exception as e:
             st.error(f"Manager agent test failed: {str(e)}")
-
-# Main UI with status indicators
-st.title("🏗️ Geotechnical AI Agent by Qwen2.5-Coder-32B-Instruct")
-
-# Show system status
-col1, col2, col3 = st.columns(3)
-with col1:
-    if smolagents_available:
-        st.success("✅ SmolaAgents Available")
-    else:
-        st.error("❌ SmolaAgents Not Available")
-
-with col2:
-    if web_agent and geotech_agent and manager_agent:
-        st.success("✅ AI Agents Ready")
-    else:
-        st.error("❌ AI Agents Not Ready")
-
-with col3:
-    try:
-        runpod_status = st.secrets["runpod"]["endpoint_url"]
-        st.success("✅ PDF Analysis Ready")
-    except:
-        st.warning("⚠️ PDF Analysis Limited")
-
-# Show processing status if available
-if st.session_state.processing_status:
-    st.info(f"Status: {st.session_state.processing_status}")
 
 # Sidebar
 with st.sidebar:
@@ -1328,34 +1199,15 @@ with st.sidebar:
             else:
                 st.warning("Please enter a query for analysis.")
     
-    # Test functionality
-    if st.button("🧪 Test System"):
-        st.write("Testing system components...")
-        
-        # Test PyTorch
-        try:
-            import torch
-            st.success(f"✅ PyTorch {torch.__version__}")
-        except Exception as e:
-            st.error(f"❌ PyTorch: {e}")
-        
-        # Test Asyncio
-        try:
-            loop = asyncio.get_running_loop()
-            st.success("✅ Asyncio Event Loop")
-        except Exception as e:
-            st.warning(f"⚠️ Asyncio: Creating new loop")
-        
-        # Test Agents
-        if smolagents_available and manager_agent:
-            try:
-                test_result = safe_agent_call(manager_agent, "What is 1+1?", "system_test")
-                st.success(f"✅ Agent Test: {test_result}")
-            except Exception as e:
-                st.error(f"❌ Agent Test: {e}")
-    
     # Add debug sidebar
     add_debug_sidebar()
+
+# Main content
+st.title("🏗️ Geotechnical AI Agent by Qwen2.5-Coder-32B-Instruct")
+
+# Show processing status if available
+if st.session_state.processing_status:
+    st.info(f"Status: {st.session_state.processing_status}")
 
 # Tabs for different functionalities
 chat_tab, analysis_tab, pdf_tab, debug_tab = st.tabs(["Chat", "Analysis Results", "PDF Analysis", "Debug"])
@@ -1524,4 +1376,3 @@ with debug_tab:
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("Built with ❤️ by Kilic Intelligence")
-st.sidebar.markdown("🛠️ **Fixed Version** - PyTorch/Streamlit Compatible")
